@@ -142,3 +142,175 @@ mod tests {
         assert!(glob_match("*", ""));
     }
 }
+
+/// A part found by [`extract_labelled`].
+#[derive(Debug, Clone)]
+pub struct LabelledPart {
+    pub name: String,
+    pub path: PathBuf,
+    /// Output group: the heading's section and its extra text, e.g. `top_color1`.
+    pub group: String,
+    pub entities: usize,
+}
+
+/// Splits loose model-space geometry (not blocks) into parts by their text labels.
+///
+/// A label is a TEXT/MTEXT of one letter plus a number (`A16`, `b3`). The part is the smallest
+/// closed contour around the label, and holds every model-space entity lying inside that contour
+/// (within `edge_tolerance`). The section comes from the nearest heading text to the left of the
+/// label (`headings`: heading text prefix -> section name, e.g. `TOP` -> `top`); labels with no heading
+/// are skipped, as are labels outside `region`. Parts are written as
+/// `<out>/<group>/<section>_<number><letter>.dxf`, one folder per heading, each with a `parts.toml`.
+pub fn extract_labelled(
+    src: &Path,
+    headings: &[(String, String)],
+    region: Option<crate::geom::BBox>,
+    opts: &crate::dxf_in::ImportOptions,
+    out_dir: &Path,
+) -> Result<Vec<LabelledPart>> {
+    use crate::dxf_in::{closed_contours, dist_to_ring, unit_scale};
+    use crate::geom::{point_in_ring, signed_area, Pt};
+
+    let d = Drawing::load_file(src).with_context(|| format!("{}: cannot read DXF", src.display()))?;
+    let scale = unit_scale(d.header.default_drawing_units, &mut Vec::new())?;
+    let loose: Vec<&dxf::entities::Entity> =
+        d.entities().filter(|e| !e.common.is_in_paper_space && !matches!(e.specific, EntityType::Insert(_))).collect();
+
+    // Contours of the loose geometry only: blocks (ribs and the like) are not panels.
+    let mut tmp = Drawing::new();
+    tmp.header.default_drawing_units = d.header.default_drawing_units;
+    for e in &loose {
+        tmp.add_entity((*e).clone());
+    }
+    let mut rings = closed_contours(&tmp, opts)?;
+    rings.sort_by(|a, b| signed_area(a).abs().total_cmp(&signed_area(b).abs()));
+
+    let text_of = |e: &dxf::entities::Entity| -> Option<(String, Pt)> {
+        match &e.specific {
+            EntityType::Text(t) => Some((t.value.trim().to_string(), Pt::new(t.location.x * scale, t.location.y * scale))),
+            EntityType::MText(t) => Some((t.text.trim().to_string(), Pt::new(t.insertion_point.x * scale, t.insertion_point.y * scale))),
+            _ => None,
+        }
+    };
+    // Heading position, section, and the group the heading names: the section plus whatever the
+    // heading says after its key ("TOP COLOR 1" -> "top_color1"), e.g. the fabric colour.
+    let heading_pos: Vec<(Pt, String, String)> = loose
+        .iter()
+        .filter_map(|e| text_of(e))
+        .filter_map(|(t, p)| {
+            let up = t.to_ascii_uppercase();
+            headings.iter().find(|(h, _)| up.starts_with(&h.to_ascii_uppercase())).map(|(h, sec)| {
+                let rest: String = t[h.len()..].chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+                let group = if rest.is_empty() { sec.clone() } else { format!("{sec}_{rest}") };
+                (p, sec.clone(), group)
+            })
+        })
+        .collect();
+    let parse_label = |t: &str| -> Option<(char, u32)> {
+        let letter = t.chars().next().filter(char::is_ascii_alphabetic)?.to_ascii_lowercase();
+        let num = &t[1..];
+        if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some((letter, num.parse().ok()?))
+    };
+
+    // Sample points of an entity, in mm, to decide which contour it lies in.
+    let points = |e: &dxf::entities::Entity| -> Vec<Pt> {
+        let p = |x: f64, y: f64| Pt::new(x * scale, y * scale);
+        match &e.specific {
+            EntityType::Line(l) => vec![p(l.p1.x, l.p1.y), p(l.p2.x, l.p2.y)],
+            EntityType::LwPolyline(pl) => pl.vertices.iter().map(|v| p(v.x, v.y)).collect(),
+            EntityType::Polyline(pl) => pl.vertices().map(|v| p(v.location.x, v.location.y)).collect(),
+            EntityType::Circle(c) => vec![p(c.center.x - c.radius, c.center.y), p(c.center.x + c.radius, c.center.y)],
+            EntityType::Arc(a) => vec![p(a.center.x, a.center.y)],
+            EntityType::Ellipse(el) => vec![p(el.center.x, el.center.y)],
+            EntityType::Spline(sp) => sp.control_points.iter().map(|q| p(q.x, q.y)).collect(),
+            EntityType::ModelPoint(m) => vec![p(m.location.x, m.location.y)],
+            _ => text_of(e).map(|(_, q)| vec![q]).unwrap_or_default(),
+        }
+    };
+
+    log::info!("loose entities {}, closed contours {}, headings {}", loose.len(), rings.len(), heading_pos.len());
+    struct Found {
+        name: String,
+        group: String,
+        ring: usize,
+    }
+    let mut found: Vec<Found> = Vec::new();
+    for e in &loose {
+        let Some((text, at)) = text_of(e) else { continue };
+        let Some((letter, number)) = parse_label(&text) else { continue };
+        if region.is_some_and(|r| at.x < r.min.x || at.x > r.max.x || at.y < r.min.y || at.y > r.max.y) {
+            continue;
+        }
+        let Some((_, section, group)) = heading_pos.iter().filter(|(h, ..)| h.x <= at.x).max_by(|a, b| a.0.x.total_cmp(&b.0.x)) else {
+            continue;
+        };
+        let Some(ring) = rings.iter().position(|r| point_in_ring(at, r)) else {
+            log::warn!("label {text} at ({:.0}, {:.0}) is not inside any closed contour", at.x, at.y);
+            continue;
+        };
+        found.push(Found { name: format!("{section}_{number}{letter}"), group: group.clone(), ring });
+    }
+
+    // Each entity goes to the smallest labelled contour it lies in.
+    let labelled: BTreeSet<usize> = found.iter().map(|f| f.ring).collect();
+    let mut members: BTreeMap<usize, Vec<&dxf::entities::Entity>> = BTreeMap::new();
+    for e in &loose {
+        let pts = points(e);
+        if pts.is_empty() {
+            continue;
+        }
+        let inside = |r: &Vec<Pt>| pts.iter().all(|&q| point_in_ring(q, r) || dist_to_ring(q, r) <= opts.edge_tolerance);
+        if let Some(i) = labelled.iter().copied().find(|&i| inside(&rings[i])) {
+            members.entry(i).or_default().push(*e);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for f in &found {
+        if !seen.insert(f.name.clone()) {
+            log::warn!("{}: label used twice, keeping the first", f.name);
+            continue;
+        }
+        let ents = members.remove(&f.ring).unwrap_or_default();
+        let group = f.group.clone();
+        let dir = out_dir.join(&group);
+        fs::create_dir_all(&dir).with_context(|| format!("{}: cannot create directory", dir.display()))?;
+
+        let mut nd = Drawing::new();
+        nd.header.version = d.header.version;
+        nd.header.default_drawing_units = d.header.default_drawing_units;
+        let layers: BTreeSet<String> = ents.iter().map(|e| e.common.layer.clone()).collect();
+        for l in layers.iter().filter(|l| l.as_str() != "0") {
+            let srcl = d.layers().filter(|x| &x.name == l).last();
+            nd.add_layer(Layer { name: l.clone(), color: srcl.map(|x| x.color.clone()).unwrap_or_default(), ..Default::default() });
+        }
+        for e in &ents {
+            nd.add_entity((*e).clone());
+        }
+        let path = dir.join(format!("{}.dxf", f.name));
+        nd.save_file(&path).with_context(|| format!("{}: cannot write", path.display()))?;
+        out.push(LabelledPart { name: f.name.clone(), path, group, entities: ents.len() });
+    }
+
+    let mut groups: BTreeMap<&str, Vec<&LabelledPart>> = BTreeMap::new();
+    for p in &out {
+        groups.entry(p.group.as_str()).or_default().push(p);
+    }
+    for (g, parts) in groups {
+        let mpath = out_dir.join(g).join("parts.toml");
+        if mpath.exists() {
+            log::warn!("{} already exists, not overwriting", mpath.display());
+            continue;
+        }
+        let mut m = String::from("# Quantity of each part. Generated by `nest extract-labelled`; check and edit.\n[parts]\n");
+        for p in parts {
+            let _ = writeln!(m, "\"{}\" = 1", p.name);
+        }
+        fs::write(&mpath, m).with_context(|| format!("{}: cannot write", mpath.display()))?;
+    }
+    Ok(out)
+}

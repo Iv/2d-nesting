@@ -26,6 +26,8 @@ enum Cmd {
     Run(RunArgs),
     /// Save blocks of an assembly DXF as separate part files
     Extract(ExtractArgs),
+    /// Save loose labelled parts (e.g. panels "A16" under a "TOP" heading) as separate part files
+    ExtractLabelled(ExtractLabelledArgs),
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -48,6 +50,32 @@ struct ExtractArgs {
     /// Output folder for the part files and parts.toml
     #[arg(short, long)]
     out: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct ExtractLabelledArgs {
+    /// Assembly DXF with loose parts, each holding a label like "A16"
+    input: PathBuf,
+
+    /// Heading texts and the section names they start, e.g. "TOP=top,BOT=bottom"
+    #[arg(long, value_delimiter = ',', required = true)]
+    headings: Vec<String>,
+
+    /// Only labels inside this box: x0,y0,x1,y1 in drawing units
+    #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
+    region: Option<Vec<f64>>,
+
+    /// Output folder; parts go to <out>/<group>/
+    #[arg(short, long)]
+    out: PathBuf,
+
+    /// Read only these DXF layers (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    layers: Option<Vec<String>>,
+
+    /// Largest gap bridged when closing part outlines, mm
+    #[arg(long, default_value_t = 1.0)]
+    close_gaps: f64,
 }
 
 #[derive(Args, Debug)]
@@ -145,6 +173,7 @@ fn main() -> ExitCode {
     let result = match cli.cmd {
         Cmd::Run(args) => run(args),
         Cmd::Extract(args) => extract(args).map(|()| true),
+        Cmd::ExtractLabelled(args) => extract_labelled(args).map(|()| true),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -162,6 +191,35 @@ fn extract(args: ExtractArgs) -> Result<()> {
         println!("{:<24} inserts in drawing: {:>2}  -> {}", b.name, b.inserts, b.path.display());
     }
     println!("Saved {} parts. Set quantities in {}", blocks.len(), args.out.join("parts.toml").display());
+    Ok(())
+}
+
+fn extract_labelled(args: ExtractLabelledArgs) -> Result<()> {
+    let headings = args
+        .headings
+        .iter()
+        .map(|h| match h.split_once('=') {
+            Some((t, s)) => Ok((t.trim().to_string(), s.trim().to_string())),
+            None => bail!("--headings expects TEXT=section, got {h:?}"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let opts = ImportOptions { layers: args.layers, close_gaps: args.close_gaps, ..Default::default() };
+    if args.region.as_ref().is_some_and(|r| r.len() != 4) {
+        bail!("--region expects x0,y0,x1,y1");
+    }
+    let region = args.region.as_ref().map(|r| nest_core::geom::BBox {
+        min: nest_core::geom::Pt::new(r[0].min(r[2]), r[1].min(r[3])),
+        max: nest_core::geom::Pt::new(r[0].max(r[2]), r[1].max(r[3])),
+    });
+    let parts = nest_core::extract::extract_labelled(&args.input, &headings, region, &opts, &args.out)?;
+    let mut groups: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for p in &parts {
+        groups.entry(p.group.as_str()).or_default().push(p.name.as_str());
+    }
+    for (g, names) in &groups {
+        println!("{g}: {} parts: {}", names.len(), names.join(" "));
+    }
+    println!("Saved {} parts under {}", parts.len(), args.out.display());
     Ok(())
 }
 

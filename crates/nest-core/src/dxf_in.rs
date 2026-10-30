@@ -228,7 +228,7 @@ fn assemble(
     Ok(shape)
 }
 
-fn dist_to_ring(p: Pt, ring: &[Pt]) -> f64 {
+pub(crate) fn dist_to_ring(p: Pt, ring: &[Pt]) -> f64 {
     (0..ring.len()).map(|i| dist_to_segment(p, ring[i], ring[(i + 1) % ring.len()])).fold(f64::INFINITY, f64::min)
 }
 
