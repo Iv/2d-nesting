@@ -116,6 +116,7 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 | `--fillers` | – | folder of filler parts for free space; may be repeated |
 | `--outlines` | – | sheet DXF with traced contours and large name labels instead of the source drawings as blocks (for checking layouts) |
 | `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
+| `--drafts` | 0 | quick drafts (1/10 of the time limit each) that decide which parts go on which sheet; the best one is polished with the full time limit per sheet. 0 = off |
 | `-t, --time-limit` | 60 | search time per sheet, s |
 | `-i, --iterations` | – | iteration budget per sheet instead of time (reproducible) |
 | `-s, --seed` | random | random seed (printed in the report) |
@@ -160,6 +161,14 @@ utilisation is parts area / (sheet width × sum of the used lengths).
 
 `--time-limit` is the budget per sheet, shared by the runs for that sheet.
 Parts that fit the sheet at no allowed angle are reported as unplaced.
+
+### Drafts
+
+Most of a run's time goes into deciding which parts go on which sheet (dealing, repairs, probes),
+little into packing each sheet tightly. With `--drafts N` the whole procedure above runs N times
+at 1/10 of the time limit with different seeds; the draft with the fewest sheets and least fabric
+(+ tilt penalty) wins, and each of its sheets is nested again with the full time limit, its parts
+staying on it. One such run is meant to replace a seed sweep, e.g. on a laptop.
 
 ### Panel tilt
 

@@ -240,6 +240,26 @@ fn panels_are_kept_straight() {
 }
 
 #[test]
+fn drafts_are_polished() {
+    let input = job_dir();
+    let demands = nest_core::manifest::load_job(input.path(), &ImportOptions::default()).unwrap();
+    let p = NestParams { width: 700.0, length: 900.0, drafts: 3, ..params(2.0, vec![0.0, 90.0, 180.0, 270.0], 9) };
+    let mut kinds = Vec::new();
+    let out = nest_core::solver::nest_observed(&demands, &p, &mut |st| kinds.push(st.kind.clone())).unwrap();
+    let r = &out.result;
+    assert!(r.unplaced.is_empty());
+    let placed: usize = r.sheets.iter().map(|s| s.placements.len()).sum();
+    assert_eq!(placed, demands.iter().map(|d| d.qty).sum::<usize>());
+    for s in &r.sheets {
+        assert!(nest_core::validate::validate_sheet(&demands, s, p.gap).ok());
+    }
+    for k in 1..=3 {
+        assert!(kinds.iter().any(|x| x.starts_with(&format!("draft{k} "))), "{kinds:?}");
+    }
+    assert_eq!(kinds.iter().filter(|x| *x == "polish").count(), r.sheets.len());
+}
+
+#[test]
 fn panel_tilt_is_limited() {
     let p = NestParams {
         tilt_penalty: 0.0,

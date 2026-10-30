@@ -134,6 +134,11 @@ struct RunArgs {
     #[arg(long, value_enum, default_value_t = StrategyArg::Balanced)]
     strategy: StrategyArg,
 
+    /// Quick drafts (each 1/10 of the time limit) that decide which parts go on which sheet; the
+    /// sheets of the best one are then nested again with the full time limit. 0 = off
+    #[arg(long, default_value_t = 0)]
+    drafts: usize,
+
     /// Search time per sheet, seconds
     #[arg(short, long, default_value_t = 60.0, conflicts_with = "iterations")]
     time_limit: f64,
@@ -264,6 +269,7 @@ fn run(cli: RunArgs) -> Result<bool> {
             StrategyArg::Balanced => nest_core::solver::Strategy::Balanced,
             StrategyArg::Greedy => nest_core::solver::Strategy::Greedy,
         },
+        drafts: cli.drafts,
         seed: cli.seed,
         workers: cli.workers,
         cancel: Some(cancel),

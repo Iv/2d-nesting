@@ -84,6 +84,10 @@ pub struct NestParams {
     pub strip_ratio: f64,
     pub budget: Budget,
     pub strategy: Strategy,
+    /// 0: sheets are made once with the full budget. Otherwise this many quick drafts (each with
+    /// 1/10 of the budget, different seeds) decide which parts go on which sheet, and every sheet of
+    /// the best draft is then nested again with the full budget.
+    pub drafts: usize,
     pub seed: Option<u64>,
     /// Number of sparrow separator workers.
     pub workers: usize,
@@ -108,6 +112,7 @@ impl Default for NestParams {
             strip_ratio: 2.0,
             budget: Budget::Time(Duration::from_secs(60)),
             strategy: Strategy::Balanced,
+            drafts: 0,
             seed: None,
             workers: DEFAULT_SPARROW_CONFIG.expl_cfg.separator_config.n_workers,
             cancel: None,
@@ -187,6 +192,11 @@ impl NestParams {
     }
 }
 
+/// A sheet is not expected to be packed denser than this, which bounds the probes worth trying.
+const MAX_DENSITY: f64 = 0.92;
+/// A draft gets this fraction (1/n) of the per-sheet budget, see [`NestParams::drafts`].
+const DRAFT_SHARE: u32 = 10;
+
 /// Panels this much longer than wide have a long axis (the grain direction) to align.
 pub const MIN_PANEL_ELONGATION: f64 = 2.0;
 
@@ -256,12 +266,11 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
 ///
 /// Half of the per-sheet budget goes to step 1, the other half is shared by the probes of step 3
 /// and the compaction.
+///
+/// With [`NestParams::drafts`] > 0 all of the above runs that many times at 1/10 of the budget;
+/// the draft with the fewest sheets and least fabric + tilt penalty wins, and each of its sheets is
+/// nested again with the full budget (its parts stay on it).
 pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn FnMut(&Step)) -> Result<NestOutcome> {
-    /// Probes per sheet; each gets an equal share of half the sheet budget.
-    const MAX_PROBES: u32 = 8;
-    /// A sheet is not expected to be packed denser than this, which bounds the probes worth trying.
-    const MAX_DENSITY: f64 = 0.92;
-
     let started = Instant::now();
     if !(params.width > 0.0 && params.length > 0.0 && params.gap >= 0.0 && params.gap < params.width) {
         bail!("invalid parameters: sheet {} x {} mm, gap {} mm", params.width, params.length, params.gap);
@@ -275,10 +284,6 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let seed = params.seed.unwrap_or_else(rand::random);
     let (prep, unplaced) = prepare(demands, params);
 
-    // Fillers are kept out until all sheets are made.
-    let mut remaining: Vec<usize> =
-        (0..demands.len()).map(|i| if prep.items[i].is_some() && !demands[i].filler { demands[i].qty } else { 0 }).collect();
-    let mut sheets: Vec<Sheet> = Vec::new();
     let mut run = 0u64;
     let mut next_seed = || {
         run += 1;
@@ -290,9 +295,114 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
+    // Fabric a sheet consumes plus the tilt penalty: what the polishing passes minimise.
+    let sheet_cost = |pl: &[Placement]| params.consumed(demands, pl, len_of(pl)) + tilt_of(pl);
     let mut report = |sheet: usize, kind: String, pl: &[Placement]| {
         observer(&Step { sheet, kind, placements: pl.to_vec(), used_length: len_of(pl), fits: fits(pl) });
     };
+
+    let mut sheets = if params.drafts == 0 {
+        make_sheets(demands, params, &prep, &mut next_seed, &mut report)?
+    } else {
+        // Quick drafts decide which parts go on which sheet; the best one is then polished, each
+        // sheet nested again with the full budget and kept if that consumes less fabric.
+        let draft_params = NestParams { budget: params.budget.share(1, DRAFT_SHARE), ..params.clone() };
+        let mut best: Option<((usize, f64), Vec<Sheet>)> = None;
+        for k in 1..=params.drafts {
+            let draft = make_sheets(demands, &draft_params, &prep, &mut next_seed, &mut |n, kind, pl| report(n, format!("draft{k} {kind}"), pl))?;
+            let score = (draft.len(), draft.iter().map(|s| sheet_cost(&s.placements)).sum::<f64>());
+            info!("draft {k}: {} sheets, {:.1} mm", score.0, score.1);
+            if best.as_ref().is_none_or(|b| score.0 < b.0.0 || (score.0 == b.0.0 && score.1 < b.0.1)) {
+                best = Some((score, draft));
+            }
+        }
+        let mut sheets = best.expect("at least one draft").1;
+        for (n, sheet) in sheets.iter_mut().enumerate() {
+            let mut counts = vec![0usize; demands.len()];
+            for p in &sheet.placements {
+                counts[p.part] += 1;
+            }
+            let trial = prep.strip(&counts, params, params.length, params.budget, next_seed())?;
+            report(n + 1, "polish".into(), &trial);
+            if fits(&trial) && sheet_cost(&trial) < sheet_cost(&sheet.placements) - eps {
+                sheet.used_length = len_of(&trial);
+                sheet.placements = trial;
+            }
+        }
+        sheets
+    };
+
+    // A free band along the top is reusable fabric: every sheet with spare length is nested again
+    // into narrower strips, and kept that way if it then consumes less fabric (tilt included).
+    if params.min_strip > 0.0 {
+        let cost = sheet_cost;
+        for (n, sheet) in sheets.iter_mut().enumerate() {
+            let parts: f64 = sheet.placements.iter().map(|p| area(p.part)).sum();
+            // Widest band that can still hold the parts on the sheet at a plausible density.
+            let h_max = params.width - parts / (MAX_DENSITY * params.length);
+            if h_max < params.min_strip {
+                continue;
+            }
+            let mut counts = vec![0usize; demands.len()];
+            for p in &sheet.placements {
+                counts[p.part] += 1;
+            }
+            let mut best = cost(&sheet.placements);
+            for h in [params.min_strip, (params.min_strip + h_max) / 2.0, h_max] {
+                let narrow = NestParams { width: params.width - h, ..params.clone() };
+                // Parts that fit the narrower strip at no angle make sparrow fail: just skip that try.
+                let Ok(trial) = prep.strip(&counts, &narrow, params.length, params.budget.share(1, 4), next_seed()) else {
+                    continue;
+                };
+                report(n + 1, format!("strip {h:.0}"), &trial);
+                if fits(&trial) && cost(&trial) < best - eps {
+                    best = cost(&trial);
+                    sheet.used_length = len_of(&trial);
+                    sheet.placements = trial;
+                }
+            }
+        }
+    }
+
+    // Fillers go into the free space of the finished sheets, which stay as they are.
+    let mut fillers: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() && demands[i].filler { demands[i].qty } else { 0 }).collect();
+    for (n, sheet) in sheets.iter_mut().enumerate() {
+        if fillers.iter().all(|&f| f == 0) {
+            break;
+        }
+        let added = prep.insert_fillers(&sheet.placements, &mut fillers, params, sheet.used_length, next_seed())?;
+        if !added.is_empty() {
+            info!("sheet {}: {} fillers added", n + 1, added.len());
+            sheet.placements.extend(added);
+            sheet.placements.sort_by_key(|p| p.part);
+            report(n + 1, "filled".into(), &sheet.placements);
+        }
+    }
+
+    Ok(NestOutcome { result: NestResult { sheets, unplaced }, seed, elapsed: started.elapsed() })
+}
+
+/// Fills sheets with all non-filler parts by the chosen strategy (see [`nest_observed`]).
+fn make_sheets(
+    demands: &[Demand],
+    params: &NestParams,
+    prep: &Prepared,
+    next_seed: &mut dyn FnMut() -> u64,
+    report: &mut dyn FnMut(usize, String, &[Placement]),
+) -> Result<Vec<Sheet>> {
+    /// Probes per sheet; each gets an equal share of half the sheet budget.
+    const MAX_PROBES: u32 = 8;
+
+    let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
+    let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
+    let area = |i: usize| demands[i].part.shape.area();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+    let eps = 1e-6;
+    let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
+    // Fillers are kept out until all sheets are made.
+    let mut remaining: Vec<usize> =
+        (0..demands.len()).map(|i| if prep.items[i].is_some() && !demands[i].filler { demands[i].qty } else { 0 }).collect();
+    let mut sheets: Vec<Sheet> = Vec::new();
 
     if params.strategy == Strategy::Balanced {
         /// Density used to estimate the sheet count and how much to move out of an overfull sheet.
@@ -453,57 +563,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         report(sheet_no, "sheet".into(), &chosen);
         sheets.push(Sheet { width: params.width, length: params.length, used_length: len_of(&chosen), placements: chosen });
     }
-
-    // A free band along the top is reusable fabric: every sheet with spare length is nested again
-    // into narrower strips, and kept that way if it then consumes less fabric (tilt included).
-    if params.min_strip > 0.0 {
-        let cost = |pl: &[Placement]| {
-            params.consumed(demands, pl, len_of(pl)) + tilt_of(pl)
-        };
-        for (n, sheet) in sheets.iter_mut().enumerate() {
-            let parts: f64 = sheet.placements.iter().map(|p| area(p.part)).sum();
-            // Widest band that can still hold the parts on the sheet at a plausible density.
-            let h_max = params.width - parts / (MAX_DENSITY * params.length);
-            if h_max < params.min_strip {
-                continue;
-            }
-            let mut counts = vec![0usize; demands.len()];
-            for p in &sheet.placements {
-                counts[p.part] += 1;
-            }
-            let mut best = cost(&sheet.placements);
-            for h in [params.min_strip, (params.min_strip + h_max) / 2.0, h_max] {
-                let narrow = NestParams { width: params.width - h, ..params.clone() };
-                // Parts that fit the narrower strip at no angle make sparrow fail: just skip that try.
-                let Ok(trial) = prep.strip(&counts, &narrow, params.length, params.budget.share(1, 4), next_seed()) else {
-                    continue;
-                };
-                report(n + 1, format!("strip {h:.0}"), &trial);
-                if fits(&trial) && cost(&trial) < best - eps {
-                    best = cost(&trial);
-                    sheet.used_length = len_of(&trial);
-                    sheet.placements = trial;
-                }
-            }
-        }
-    }
-
-    // Fillers go into the free space of the finished sheets, which stay as they are.
-    let mut fillers: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() && demands[i].filler { demands[i].qty } else { 0 }).collect();
-    for (n, sheet) in sheets.iter_mut().enumerate() {
-        if fillers.iter().all(|&f| f == 0) {
-            break;
-        }
-        let added = prep.insert_fillers(&sheet.placements, &mut fillers, params, sheet.used_length, next_seed())?;
-        if !added.is_empty() {
-            info!("sheet {}: {} fillers added", n + 1, added.len());
-            sheet.placements.extend(added);
-            sheet.placements.sort_by_key(|p| p.part);
-            report(n + 1, "filled".into(), &sheet.placements);
-        }
-    }
-
-    Ok(NestOutcome { result: NestResult { sheets, unplaced }, seed, elapsed: started.elapsed() })
+    Ok(sheets)
 }
 
 /// Solver-ready items: one per demand, `None` for parts that fit the sheet at no allowed angle.
