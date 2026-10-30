@@ -140,6 +140,16 @@ pub fn contours(drawing: &Drawing, opts: &ImportOptions) -> Result<(Vec<(Ring, S
     Ok(chain(pieces, opts.join_tolerance))
 }
 
+/// All closed contours of a drawing, including rings that only close with the `close_gaps` tolerance.
+/// For analysing existing multi-part layouts.
+pub fn closed_contours(drawing: &Drawing, opts: &ImportOptions) -> Result<Vec<Ring>> {
+    let mut warnings = Vec::new();
+    let pieces = collect_pieces(drawing, opts, &mut warnings)?;
+    let (rings, open) = chain(pieces, opts.join_tolerance);
+    let (bridged, _) = chain(open, opts.close_gaps);
+    Ok(rings.into_iter().chain(bridged).map(|(r, _)| r).filter(|r| r.len() >= 3 && signed_area(r).abs() > 1e-6).collect())
+}
+
 /// Picks the outer contour and checks that everything else lies inside it.
 ///
 /// The outer contour is the largest closed ring. If the open chains, joined with the coarser
