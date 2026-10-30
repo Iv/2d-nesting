@@ -387,15 +387,40 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
             items.push(None);
             continue;
         }
-        items.push(Some(BaseItem {
+        let make = |ring: Vec<(f32, f32)>| BaseItem {
             id: idx as u64,
             orientation: ExtOrientation {
                 rotation: ExtRotation::Discrete { angles: fitting.iter().map(|&r| r as f32).collect() },
                 reflection_axes: vec![],
             },
-            shape: ExtShape::SimplePolygon(ExtSPolygon(solver_ring(&d.part.name, &d.part.shape.outer, offsets[idx]))),
+            shape: ExtShape::SimplePolygon(ExtSPolygon(ring)),
             min_quality: None,
-        }));
+        };
+        // jagua-rs offsets every item by half the gap, which can make tiny notches self-intersect.
+        // Check each item the way the solver will import it; a rejected outline is replaced by a
+        // smoothed envelope 0.5 mm larger, and only if that fails too is the part left out.
+        let importer = Importer::new(DEFAULT_SPARROW_CONFIG.cde_config, DEFAULT_SPARROW_CONFIG.poly_simpl_tolerance, DEFAULT_SPARROW_CONFIG.narrow_concavity_cutoff_ratio);
+        let importer = importer.with_min_item_separation(params.gap as f32).unwrap_or(importer);
+        let accepted = |it: &BaseItem| importer.import_item(it, 0).map(|_| ()).map_err(|e| format!("{e:#}"));
+        let item = make(solver_ring(&d.part.name, &d.part.shape.outer, offsets[idx]));
+        let item = match accepted(&item) {
+            Ok(()) => item,
+            Err(first) => {
+                let robust = make(envelope_ring(&d.part.shape.outer, offsets[idx], 0.5));
+                match accepted(&robust) {
+                    Ok(()) => {
+                        warn!("{}: outline rejected by jagua-rs ({first}); nesting uses an envelope 0.5 mm larger", d.part.name);
+                        robust
+                    }
+                    Err(e) => {
+                        unplaced.push(Unplaced { part: idx, qty: d.qty, reason: format!("outline rejected by the solver: {e}") });
+                        items.push(None);
+                        continue;
+                    }
+                }
+            }
+        };
+        items.push(Some(item));
     }
     (Prepared { demands, items, angles, offsets }, unplaced)
 }
@@ -466,6 +491,25 @@ impl Prepared<'_> {
 /// such points are dropped. A self-intersecting outline is replaced by a 0.1 mm buffer around it,
 /// simplified by 0.05 mm: valid and never smaller than the original. The independent validation
 /// still checks the exact geometry.
+/// Outline grown by `grow` mm and simplified by a fifth of that: valid, slightly larger, without
+/// notches narrower than about `2 * grow`.
+fn envelope_ring(ring: &[Pt], origin: Pt, grow: f64) -> Vec<(f32, f32)> {
+    use geo::{Area, Buffer, Simplify};
+    let poly = geo::Polygon::new(ring.iter().map(|p| (p.x - origin.x, p.y - origin.y)).collect::<Vec<_>>().into(), vec![]);
+    let grown = poly.buffer(grow);
+    let Some(best) = grown.0.iter().max_by(|a, b| a.unsigned_area().total_cmp(&b.unsigned_area())) else {
+        return Vec::new();
+    };
+    let simple = geo::Polygon::new(best.exterior().clone(), vec![]).simplify(grow / 5.0);
+    let mut seen = std::collections::HashSet::new();
+    let mut pts = simple.exterior().0.clone();
+    pts.pop();
+    pts.iter()
+        .map(|c| (c.x as f32, c.y as f32))
+        .filter(|q| seen.insert(((q.0 * 1000.0).round() as i64, (q.1 * 1000.0).round() as i64)))
+        .collect()
+}
+
 fn solver_ring(name: &str, ring: &[Pt], origin: Pt) -> Vec<(f32, f32)> {
     use geo::{Area, Buffer, Simplify, Validation};
     // Drops points closer than 1 µm to an already kept one (f32 noise, repeated vertices).
