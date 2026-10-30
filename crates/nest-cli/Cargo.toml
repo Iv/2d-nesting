@@ -1,0 +1,17 @@
+[package]
+name = "nest-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nest"
+path = "src/main.rs"
+
+[dependencies]
+nest-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true

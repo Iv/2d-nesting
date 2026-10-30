@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/nest-core", "crates/nest-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.dependencies]
+nest-core = { path = "crates/nest-core" }
+sparrow = { path = "../sparrow" }
+jagua-rs = { version = "=1.1.0", features = ["spp"] }
+rand = "0.10"
+dxf = "0.6"
+geo = "0.33"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+csv = "1.4"
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4.6", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# sparrow is float-heavy; keep tests usable
+[profile.test]
+opt-level = 3
