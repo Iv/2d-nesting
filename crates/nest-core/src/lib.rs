@@ -1,6 +1,6 @@
-//! Раскладка лекал на ткань (2D strip packing) поверх sparrow / jagua-rs.
+//! Nesting of pattern pieces on fabric (2D strip packing) on top of sparrow / jagua-rs.
 //!
-//! Вся логика здесь; CLI (и будущий GUI) только собирают параметры и вызывают [`run`].
+//! All logic lives here; the CLI (and a future GUI) only collect parameters and call [`run`].
 
 pub mod dxf_in;
 pub mod dxf_out;
@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use validate::Validation;
 
-/// Итог полного прогона.
+/// Result of a full run.
 pub struct JobOutput {
     pub demands: Vec<Demand>,
     pub outcome: NestOutcome,
@@ -33,7 +33,7 @@ impl JobOutput {
     }
 }
 
-/// Читает папку с деталями, раскладывает, проверяет и пишет `sheet_N.dxf` и `report.txt` в `out_dir`.
+/// Reads a folder of parts, nests, validates and writes `sheet_N.dxf` and `report.txt` to `out_dir`.
 pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params: &NestParams) -> Result<JobOutput> {
     let demands = manifest::load_job(input, import)?;
     let outcome = solver::nest(&demands, params)?;
@@ -44,7 +44,7 @@ pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params:
         .map(|s| validate::validate_sheet(&demands, s, params.gap))
         .collect();
 
-    fs::create_dir_all(out_dir).with_context(|| format!("{}: не удалось создать папку", out_dir.display()))?;
+    fs::create_dir_all(out_dir).with_context(|| format!("{}: cannot create directory", out_dir.display()))?;
     let mut sheet_files = Vec::new();
     for (i, sheet) in outcome.result.sheets.iter().enumerate() {
         let path = out_dir.join(format!("sheet_{}.dxf", i + 1));
@@ -53,7 +53,7 @@ pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params:
     }
     let report = report::render(&demands, params, &outcome, &validations);
     let report_path = out_dir.join("report.txt");
-    fs::write(&report_path, &report).with_context(|| format!("{}: не удалось записать", report_path.display()))?;
+    fs::write(&report_path, &report).with_context(|| format!("{}: cannot write", report_path.display()))?;
 
     Ok(JobOutput { demands, outcome, validations, report, sheet_files })
 }

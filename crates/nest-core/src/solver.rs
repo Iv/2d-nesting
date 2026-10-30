@@ -1,6 +1,6 @@
-//! Обёртка над sparrow / jagua-rs: задание → `ExtSPInstance` → оптимизация → размещения в координатах DXF.
+//! Wrapper over sparrow / jagua-rs: job -> `ExtSPInstance` -> optimisation -> placements in DXF coordinates.
 //!
-//! Соответствие осей: ширина ткани = высота полосы jagua (Y), длина отреза = ширина полосы (X).
+//! Axes: fabric width = jagua strip height (Y), cut length = strip width (X).
 
 use crate::geom::{BBox, Demand, NestResult, Placement, Pt, Sheet, Transform, Unplaced};
 use anyhow::{bail, Context, Result};
@@ -21,30 +21,34 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Когда останавливать поиск.
+/// When to stop the search.
 #[derive(Debug, Clone, Copy)]
 pub enum Budget {
-    /// По времени. С одинаковым seed результат может отличаться от прогона к прогону.
+    /// Wall-clock limit. Results may differ between runs even with the same seed.
     Time(Duration),
-    /// По числу проверок условия остановки: полностью воспроизводимо при том же seed и числе потоков.
+    /// Number of termination checks: fully reproducible with the same seed and worker count.
     Iterations(usize),
 }
 
 #[derive(Debug, Clone)]
 pub struct NestParams {
-    /// Ширина ткани, мм.
+    /// Fabric width, mm.
     pub width: f64,
-    /// Максимальная длина отреза, мм (превышение даёт предупреждение).
+    /// Maximum cut length, mm (exceeding it gives a warning).
     pub max_length: f64,
-    /// Минимальный зазор между деталями, мм. До края ткани зазор не добавляется.
+    /// Minimum gap between parts, mm. No gap is added at the fabric edge.
     pub gap: f64,
-    /// Разрешённые углы поворота, градусы.
+    /// Base rotation angles, degrees.
     pub rotations: Vec<f64>,
+    /// Each base angle may deviate by up to this much in either direction, degrees.
+    pub rotation_tolerance: f64,
+    /// Step of the deviation around each base angle, degrees.
+    pub rotation_step: f64,
     pub budget: Budget,
     pub seed: Option<u64>,
-    /// Число потоков сепаратора sparrow.
+    /// Number of sparrow separator workers.
     pub workers: usize,
-    /// Внешняя отмена (Ctrl-C в CLI, кнопка в GUI): поиск переходит к следующей фазе / завершается.
+    /// External cancel (Ctrl-C in the CLI, a button in a GUI): moves to the next phase / stops.
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -54,7 +58,9 @@ impl Default for NestParams {
             width: 1560.0,
             max_length: 5800.0,
             gap: 0.0,
-            rotations: vec![0.0, 180.0],
+            rotations: vec![0.0, 90.0, 180.0, 270.0],
+            rotation_tolerance: 0.0,
+            rotation_step: 1.0,
             budget: Budget::Time(Duration::from_secs(60)),
             seed: None,
             workers: DEFAULT_SPARROW_CONFIG.expl_cfg.separator_config.n_workers,
@@ -63,10 +69,30 @@ impl Default for NestParams {
     }
 }
 
+impl NestParams {
+    /// All allowed angles: every base angle ± tolerance in steps, normalised to [0, 360).
+    pub fn allowed_angles(&self) -> Vec<f64> {
+        let n = if self.rotation_tolerance > 0.0 { (self.rotation_tolerance / self.rotation_step + 1e-9).floor() as i64 } else { 0 };
+        let mut out: Vec<f64> = self
+            .rotations
+            .iter()
+            .flat_map(|&b| (-n..=n).map(move |k| b + k as f64 * self.rotation_step))
+            .map(|a| {
+                let a = a.rem_euclid(360.0);
+                // Keep angles tidy: 359.9999999 -> 0.
+                if (a - 360.0).abs() < 1e-9 { 0.0 } else { (a * 1e6).round() / 1e6 }
+            })
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NestOutcome {
     pub result: NestResult,
-    /// Фактически использованный seed (сгенерированный, если не был задан).
+    /// The seed actually used (generated if none was given).
     pub seed: u64,
     pub elapsed: Duration,
 }
@@ -74,22 +100,25 @@ pub struct NestOutcome {
 pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
     let started = Instant::now();
     if !(params.width > 0.0 && params.gap >= 0.0 && params.gap < params.width) {
-        bail!("неверные параметры: ширина {} мм, зазор {} мм", params.width, params.gap);
+        bail!("invalid parameters: width {} mm, gap {} mm", params.width, params.gap);
     }
     if params.rotations.is_empty() {
-        bail!("список разрешённых углов пуст");
+        bail!("the list of allowed angles is empty");
     }
+    if params.rotation_tolerance < 0.0 || (params.rotation_tolerance > 0.0 && params.rotation_step <= 0.0) {
+        bail!("invalid rotation tolerance or step");
+    }
+    let angles = params.allowed_angles();
     let seed = params.seed.unwrap_or_else(rand::random);
 
-    // Детали переносятся так, чтобы левый нижний угол bbox был в нуле: jagua работает в f32,
-    // и большие координаты чертежа съели бы точность.
+    // Parts are moved so their bbox starts at the origin: jagua works in f32
+    // and large drawing coordinates would eat the precision.
     let offsets: Vec<Pt> = demands.iter().map(|d| d.part.shape.bbox().min).collect();
 
     let mut unplaced = Vec::new();
     let mut items = Vec::new();
     for (idx, d) in demands.iter().enumerate() {
-        let fitting: Vec<f64> = params
-            .rotations
+        let fitting: Vec<f64> = angles
             .iter()
             .copied()
             .filter(|&r| rotated_height(d, r) <= params.width + 1e-6)
@@ -99,7 +128,7 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
                 part: idx,
                 qty: d.qty,
                 reason: format!(
-                    "не помещается в ширину {} мм ни при одном разрешённом угле",
+                    "does not fit the {} mm width at any allowed angle",
                     params.width
                 ),
             });
@@ -130,8 +159,8 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
         });
     }
 
-    // jagua раздувает детали на g/2 и сужает полосу на g/2: до края получается g.
-    // Полосу расширяем на 2g и потом сдвигаем всё на −g, чтобы детали доставали до кромки.
+    // jagua inflates parts by g/2 and deflates the strip by g/2, giving g at the edge too.
+    // So the strip is made 2g taller and everything is shifted by −g, letting parts reach the edge.
     let ext_instance = ExtSPInstance {
         name: "nest".into(),
         min_item_separation: g as f32,
@@ -148,7 +177,7 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
                 .cloned()
                 .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_default();
-            anyhow::anyhow!("внутренняя ошибка солвера: {msg}")
+            anyhow::anyhow!("internal solver error: {msg}")
         })??;
 
     let mut placements = Vec::new();
@@ -156,16 +185,16 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
         let part = pi.item().external_id() as usize;
         let ext = jagua_rs::io::export::int_to_ext_transformation(&pi.d_transf(), &pi.item().shape_orig().pre_transform);
         if ext.reflected {
-            bail!("солвер вернул отражённую деталь, хотя отражение не разрешалось");
+            bail!("the solver returned a mirrored part although mirroring was not allowed");
         }
         let rot = f64::from(ext.rotation()).to_degrees();
         let (tx, ty) = ext.translation();
-        // Итог: R·(p − offset) + t − (g, g).
+        // Result: R·(p − offset) + t − (g, g).
         let r = Transform { rotation_deg: rot, translation: Pt::new(0.0, 0.0) }.apply(offsets[part]);
         placements.push(Placement {
             part,
             transform: Transform {
-                rotation_deg: snap_angle(rot, &params.rotations),
+                rotation_deg: snap_angle(rot, &angles),
                 translation: Pt::new(f64::from(tx) - r.x - g, f64::from(ty) - r.y - g),
             },
         });
@@ -175,14 +204,14 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
     let placed_total = placements.len();
     let wanted: usize = demands.iter().map(|d| d.qty).sum::<usize>() - unplaced.iter().map(|u| u.qty).sum::<usize>();
     if placed_total != wanted {
-        bail!("солвер разместил {placed_total} деталей из {wanted}");
+        bail!("the solver placed {placed_total} of {wanted} parts");
     }
 
     let length = placements
         .iter()
         .map(|p| demands[p.part].part.shape.transformed(&p.transform).bbox().max.x)
         .fold(0.0, f64::max);
-    info!("длина раскладки {length:.1} мм, {placed_total} деталей");
+    info!("layout length {length:.1} mm, {placed_total} parts");
 
     Ok(NestOutcome {
         result: NestResult {
@@ -226,10 +255,10 @@ fn solver_ring(name: &str, ring: &[Pt], origin: Pt) -> Vec<(f32, f32)> {
     pts.pop();
     let fixed = clean(&mut pts.iter().map(|c| (c.x, c.y)));
     if as_poly(&fixed).is_valid() {
-        warn!("{name}: внешний контур самопересекается, для раскладки взят его контур с запасом 0.1 мм");
+        warn!("{name}: the outer contour self-intersects; nesting uses its outline grown by 0.1 mm");
         fixed
     } else {
-        warn!("{name}: внешний контур самопересекается и не исправляется автоматически");
+        warn!("{name}: the outer contour self-intersects and cannot be repaired automatically");
         out
     }
 }
@@ -239,7 +268,7 @@ fn rotated_height(d: &Demand, rot: f64) -> f64 {
     BBox::of(d.part.shape.outer.iter().map(|&p| t.apply(p))).height()
 }
 
-/// Угол из f32 солвера приводится к ближайшему разрешённому (убирает шум вроде 179.99998°).
+/// Snaps the solver's f32 angle to the nearest allowed one (removes noise like 179.99998°).
 fn snap_angle(rot: f64, allowed: &[f64]) -> f64 {
     let norm = |a: f64| a.rem_euclid(360.0);
     allowed
@@ -267,8 +296,8 @@ fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, seed: u
             // Re-import item by item to name the offending part.
             let bad = ext.items.iter().enumerate().find_map(|(i, it)| importer.import_item(&it.base, i).err().map(|e| (it.base.id, e)));
             return Err(match bad {
-                Some((id, e)) => anyhow::anyhow!("jagua-rs отклонил деталь {}: {e:#}", names[id as usize]),
-                None => e.context("jagua-rs отклонил задание"),
+                Some((id, e)) => anyhow::anyhow!("jagua-rs rejected part {}: {e:#}", names[id as usize]),
+                None => e.context("jagua-rs rejected the job"),
             });
         }
     };
@@ -283,14 +312,14 @@ fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, seed: u
             optimize(instance, rng, &mut listener, &mut term, &config.expl_cfg, &config.cmpr_cfg, None)
         }
         Budget::Iterations(total) => {
-            // Сжатие по умолчанию затухает по часам; для воспроизводимости — по числу неудач.
+            // Compression decays by the clock by default; failure-based decay keeps it reproducible.
             config.cmpr_cfg.shrink_decay = ShrinkDecayStrategy::FailureBased(DEFAULT_FAIL_DECAY_RATIO_CMPR);
             let explore = ((total as f32) * DEFAULT_EXPLORE_TIME_RATIO).round() as usize;
             let mut term = IterTerminator::new(vec![explore, total.saturating_sub(explore)], cancel);
             optimize(instance, rng, &mut listener, &mut term, &config.expl_cfg, &config.cmpr_cfg, None)
         }
     }
-    .context("sparrow не смог построить раскладку")
+    .context("sparrow could not build a layout")
 }
 
 struct ProgressListener;
@@ -299,8 +328,8 @@ impl SolutionListener for ProgressListener {
     fn report(&mut self, report: ReportType, solution: &SPSolution) {
         if matches!(report, ReportType::ExplFeas | ReportType::CmprFeas) {
             info!(
-                "[{}] найдено решение: длина {:.1} мм, плотность {:.2}%",
-                if report == ReportType::ExplFeas { "поиск" } else { "сжатие" },
+                "[{}] feasible layout: length {:.1} mm, density {:.2}%",
+                if report == ReportType::ExplFeas { "explore" } else { "compress" },
                 solution.strip_width(),
                 solution.density() * 100.0
             );
@@ -308,8 +337,8 @@ impl SolutionListener for ProgressListener {
     }
 }
 
-/// Остановка по времени фазы или по внешней отмене. Отмена сбрасывается при смене фазы,
-/// как у Ctrl-C в sparrow: первая отмена завершает поиск, вторая — сжатие.
+/// Stops on the phase deadline or on external cancel. Cancel resets on phase change,
+/// like sparrow's Ctrl-C: the first cancel ends exploration, the second compression.
 struct TimeTerminator {
     deadline: Option<Instant>,
     cancel: Arc<AtomicBool>,
@@ -330,8 +359,8 @@ impl Terminator for TimeTerminator {
     }
 }
 
-/// Остановка после заданного числа вызовов `kill()` в каждой фазе (поиск, сжатие).
-/// Часы не участвуют, поэтому при том же seed и числе потоков результат повторяется.
+/// Stops after a fixed number of `kill()` calls per phase (exploration, compression).
+/// The clock is not involved, so the same seed and worker count give the same result.
 struct IterTerminator {
     phase_budgets: Vec<usize>,
     next_phase: usize,
@@ -350,7 +379,7 @@ impl Terminator for IterTerminator {
         if self.cancel.load(Ordering::SeqCst) {
             return true;
         }
-        // fetch_update устарел в новых Rust, но try_update недоступен в MSRV 1.90.
+        // fetch_update is deprecated in newer Rust, but try_update is not in MSRV 1.90.
         #[allow(deprecated)]
         let prev = self
             .remaining

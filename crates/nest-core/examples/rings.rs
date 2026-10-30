@@ -1,4 +1,4 @@
-//! Диагностика: замкнутые контуры детали, их площадь, bbox и доля точек внутри наибольшего.
+//! Diagnostics: closed contours of a part, their area, bbox and share of points inside the largest one.
 use nest_core::dxf_in::{contours, ImportOptions};
 use nest_core::geom::{point_in_ring, signed_area, BBox};
 

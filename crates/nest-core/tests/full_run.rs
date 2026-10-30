@@ -52,19 +52,19 @@ fn full_run_with_gap_is_valid() {
     assert_eq!(sheet.placements.len(), 23);
     assert!(job.outcome.result.unplaced.is_empty());
 
-    // Нижняя граница по площади и разумный верх.
+    // Area lower bound and a sane upper bound.
     let area: f64 = sheet.placements.iter().map(|pl| job.demands[pl.part].part.shape.area()).sum();
     assert!(sheet.length >= area / sheet.width);
-    assert!(sheet.length < 2.0 * area / sheet.width + 500.0, "длина {}", sheet.length);
+    assert!(sheet.length < 2.0 * area / sheet.width + 500.0, "length {}", sheet.length);
 
-    // Детали только 0° или 180°.
+    // Only 0° or 180°.
     assert!(sheet.placements.iter().all(|pl| [0.0, 180.0].contains(&pl.transform.rotation_deg)));
 
-    // DXF читается обратно: 1 прямоугольник листа, контуры с отверстиями (frame × 2 = по 3 контура), подписи.
+    // The DXF reads back: 1 sheet rectangle, contours with holes (frame × 2 = 3 contours each), labels.
     let (s, parts, labels) = layer_counts(&job.sheet_files[0]);
     assert_eq!((s, parts, labels), (1, 23 + 2 * 2, 23));
     let report = fs::read_to_string(out.path().join("report.txt")).unwrap();
-    assert!(report.contains("Использование ткани") && report.contains("проверка пройдена"));
+    assert!(report.contains("Utilisation") && report.contains("validation passed"));
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn same_seed_and_iterations_give_same_layout() {
 #[test]
 fn fixed_orientation_and_too_wide_parts() {
     let input = job_dir();
-    // Деталь шире ткани при любом повороте → неразмещённая.
+    // A part wider than the fabric at every angle ends up unplaced.
     save(input.path(), "huge", dxf::enums::Units::Millimeters, vec![on("0", rect(0.0, 0.0, 1700.0, 1700.0))]);
     let out = tempfile::tempdir().unwrap();
     let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(2.0, vec![0.0], 1)).unwrap();
@@ -95,5 +95,19 @@ fn fixed_orientation_and_too_wide_parts() {
     assert!(r.sheets[0].placements.iter().all(|pl| pl.transform.rotation_deg == 0.0));
     assert_eq!(r.unplaced.len(), 1);
     assert_eq!(job.demands[r.unplaced[0].part].part.name, "huge");
-    assert!(job.report.contains("Не размещено деталей: 1"));
+    assert!(job.report.contains("Unplaced parts: 1"));
+}
+
+#[test]
+fn rotation_tolerance_expands_angles() {
+    let p = NestParams { rotations: vec![0.0, 90.0], rotation_tolerance: 2.0, rotation_step: 1.0, ..Default::default() };
+    assert_eq!(p.allowed_angles(), vec![0.0, 1.0, 2.0, 88.0, 89.0, 90.0, 91.0, 92.0, 358.0, 359.0]);
+
+    let input = job_dir();
+    let out = tempfile::tempdir().unwrap();
+    let p = NestParams { rotation_tolerance: 10.0, rotation_step: 5.0, ..params(1.0, vec![0.0, 90.0, 180.0, 270.0], 3) };
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    assert!(job.valid(), "{}", job.validations[0]);
+    let allowed = p.allowed_angles();
+    assert!(job.outcome.result.sheets[0].placements.iter().all(|pl| allowed.contains(&pl.transform.rotation_deg)));
 }

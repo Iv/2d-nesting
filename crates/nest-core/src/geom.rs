@@ -1,4 +1,4 @@
-//! Базовая геометрия: точки, контуры, детали, размещения и листы. Все размеры в мм.
+//! Basic geometry: points, contours, parts, placements and sheets. All sizes in mm.
 
 use std::path::PathBuf;
 
@@ -18,10 +18,10 @@ impl Pt {
     }
 }
 
-/// Замкнутый контур без повтора первой точки в конце.
+/// Closed contour without repeating the first point at the end.
 pub type Ring = Vec<Pt>;
 
-/// Удвоенная знаковая площадь со знаком: > 0 для обхода против часовой стрелки.
+/// Signed area: positive for counter-clockwise rings.
 pub fn signed_area(ring: &[Pt]) -> f64 {
     let n = ring.len();
     let mut s = 0.0;
@@ -33,7 +33,7 @@ pub fn signed_area(ring: &[Pt]) -> f64 {
     s / 2.0
 }
 
-/// Точка внутри контура (ray casting); точки на границе дают произвольный результат.
+/// Point-in-ring test (ray casting); points on the boundary give either answer.
 pub fn point_in_ring(p: Pt, ring: &[Pt]) -> bool {
     let n = ring.len();
     let mut inside = false;
@@ -82,19 +82,19 @@ impl BBox {
     }
 }
 
-/// Деталь: внешний контур (по нему идёт раскладка) и всё, что внутри него.
-/// Внешний контур против часовой стрелки, внутренние замкнутые по часовой.
+/// A part: the outer contour (used for nesting) and everything inside it.
+/// The outer contour is counter-clockwise, inner closed contours clockwise.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Shape {
     pub outer: Ring,
-    /// Замкнутые контуры внутри детали любой вложенности (отверстия, вырезы, контуры в отверстиях).
+    /// Closed contours inside the part at any depth (holes, cut-outs, contours inside holes).
     pub holes: Vec<Ring>,
-    /// Незамкнутые линии внутри детали.
+    /// Open lines inside the part.
     pub lines: Vec<Vec<Pt>>,
 }
 
 impl Shape {
-    /// Приводит ориентацию контуров к канонической.
+    /// Normalises ring orientation.
     pub fn new(mut outer: Ring, mut holes: Vec<Ring>) -> Self {
         if signed_area(&outer) < 0.0 {
             outer.reverse();
@@ -107,12 +107,12 @@ impl Shape {
         Self { outer, holes, lines: Vec::new() }
     }
 
-    /// Площадь по внешнему контуру: столько ткани деталь занимает в раскладке.
+    /// Area of the outer contour: the fabric the part takes up in a layout.
     pub fn area(&self) -> f64 {
         signed_area(&self.outer)
     }
 
-    /// Площадь материала по правилу чёт-нечет: контур на нечётной глубине вычитается, на чётной добавляется.
+    /// Net material area by the even-odd rule: odd-depth contours subtract, even-depth ones add.
     pub fn net_area(&self) -> f64 {
         let depth = |h: &Ring| self.holes.iter().filter(|o| !std::ptr::eq(*o, h) && point_in_ring(h[0], o)).count();
         self.area()
@@ -137,7 +137,7 @@ impl Shape {
     }
 }
 
-/// Поворот на `rotation_deg` вокруг начала координат детали, затем сдвиг.
+/// Rotation by `rotation_deg` about the part origin, then translation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {
     pub rotation_deg: f64,
@@ -154,7 +154,7 @@ impl Transform {
     }
 }
 
-/// Деталь, прочитанная из одного DXF.
+/// A part read from one DXF.
 #[derive(Debug, Clone)]
 pub struct Part {
     pub name: String,
@@ -162,23 +162,23 @@ pub struct Part {
     pub shape: Shape,
 }
 
-/// Деталь и сколько её нужно.
+/// A part and how many are needed.
 #[derive(Debug, Clone)]
 pub struct Demand {
     pub part: Part,
     pub qty: usize,
 }
 
-/// Одна размещённая копия детали.
+/// One placed copy of a part.
 #[derive(Debug, Clone)]
 pub struct Placement {
-    /// Индекс в списке `Demand` задания.
+    /// Index into the job's `Demand` list.
     pub part: usize,
-    /// Преобразование исходной геометрии DXF в координаты листа.
+    /// Maps the original DXF geometry to sheet coordinates.
     pub transform: Transform,
 }
 
-/// Отрез ткани. Ширина по Y, длина по X, начало координат в левом нижнем углу.
+/// A piece of fabric. Width along Y, length along X, origin at the bottom-left corner.
 #[derive(Debug, Clone)]
 pub struct Sheet {
     pub width: f64,
@@ -193,7 +193,7 @@ pub struct Unplaced {
     pub reason: String,
 }
 
-/// Результат раскладки. Сейчас всегда один лист, но структура рассчитана на несколько.
+/// Nesting result. Always one sheet for now, but the structure allows several.
 #[derive(Debug, Clone)]
 pub struct NestResult {
     pub sheets: Vec<Sheet>,

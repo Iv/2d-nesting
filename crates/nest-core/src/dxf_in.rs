@@ -1,5 +1,5 @@
-//! Чтение детали из DXF: замкнутые контуры из LWPOLYLINE, POLYLINE, цепочек LINE/ARC, CIRCLE,
-//! ELLIPSE и SPLINE (в том числе внутри блоков INSERT). Кривые аппроксимируются полилинией.
+//! Reads a part from DXF: closed contours from LWPOLYLINE, POLYLINE, LINE/ARC chains, CIRCLE,
+//! ELLIPSE and SPLINE (also inside INSERT blocks). Curves are approximated by polylines.
 
 use crate::geom::{point_in_ring, signed_area, Part, Pt, Ring, Shape};
 use anyhow::{bail, Context, Result};
@@ -13,16 +13,16 @@ use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
-    /// Максимальное отклонение хорды от дуги/сплайна, мм.
+    /// Maximum chord deviation from an arc/spline, mm.
     pub tolerance: f64,
-    /// Насколько могут расходиться концы соседних отрезков цепочки, мм.
+    /// How far apart the ends of adjacent chain pieces may be, mm.
     pub join_tolerance: f64,
-    /// Если задан, читаются только эти слои (без учёта регистра).
+    /// If set, only these layers are read (case-insensitive).
     pub layers: Option<Vec<String>>,
-    /// Слои, которые пропускаются (без учёта регистра).
+    /// Layers to skip (case-insensitive).
     pub ignore_layers: Vec<String>,
-    /// Разрешать незамкнутые линии внутри внешнего контура (они переносятся в результат вместе с деталью).
-    /// Если `false`, любая незамкнутая линия — ошибка.
+    /// Allow open lines inside the outer contour (they travel with the part into the output).
+    /// If `false`, any open line is an error.
     pub allow_open_inside: bool,
     /// Gap up to which open pieces are bridged when assembling the outer contour, mm.
     pub close_gaps: f64,
@@ -54,14 +54,14 @@ impl ImportOptions {
     }
 }
 
-/// Читает одну деталь; имя детали = имя файла без расширения.
+/// Reads one part; the part name is the file stem.
 pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let drawing = Drawing::load_file(path)
-        .with_context(|| format!("{}: не удалось прочитать DXF", path.display()))?;
+        .with_context(|| format!("{}: cannot read DXF", path.display()))?;
     let mut warnings = Vec::new();
     let shape = shape_from_drawing(&drawing, opts, &mut warnings)
         .with_context(|| format!("{}", path.display()))?;
@@ -75,12 +75,12 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
     })
 }
 
-/// Множитель перевода единиц чертежа в мм.
+/// Scale factor from drawing units to mm.
 fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
     Ok(match units {
         Units::Millimeters => 1.0,
         Units::Unitless => {
-            warnings.push("$INSUNITS не задан, считаю единицы миллиметрами".into());
+            warnings.push("$INSUNITS is not set, assuming millimetres".into());
             1.0
         }
         Units::Centimeters => 10.0,
@@ -89,7 +89,7 @@ fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
         Units::Inches | Units::USSurveyInch => 25.4,
         Units::Feet => 304.8,
         Units::Microns => 0.001,
-        other => bail!("неподдерживаемые единицы чертежа $INSUNITS = {other:?}"),
+        other => bail!("unsupported drawing units $INSUNITS = {other:?}"),
     })
 }
 
@@ -104,7 +104,7 @@ pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mu
         }
         let detail = by_layer
             .iter()
-            .map(|(l, n)| format!("слой \"{l}\": {n}"))
+            .map(|(l, n)| format!("layer \"{l}\": {n}"))
             .collect::<Vec<_>>()
             .join(", ");
         // The distance between chain ends hints whether a larger --join-tolerance would help.
@@ -112,8 +112,8 @@ pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mu
         gaps.sort_by(f64::total_cmp);
         let gaps = gaps.iter().take(3).map(|g| format!("{g:.3}")).collect::<Vec<_>>().join(", ");
         bail!(
-            "{} незамкнутых контуров ({detail}; разрыв между концами цепочек, мм: {gaps}). \
-             Замкните контуры в чертеже, увеличьте --join-tolerance или исключите слой через --ignore-layers",
+            "{} open contours ({detail}; distance between chain ends, mm: {gaps}). \
+             Close the contours in the drawing, raise --join-tolerance or skip the layer with --ignore-layers",
             open.len()
         );
     }
@@ -128,7 +128,7 @@ fn collect_pieces(drawing: &Drawing, opts: &ImportOptions, warnings: &mut Vec<St
         collector.entity(e, &root, None, 0)?;
     }
     if !collector.skipped.is_empty() {
-        debug!("пропущены объекты: {:?}", collector.skipped);
+        debug!("skipped entities: {:?}", collector.skipped);
     }
     Ok(collector.pieces)
 }
@@ -158,7 +158,7 @@ fn assemble(
         .filter(|(r, layer)| {
             let ok = usable(r);
             if !ok {
-                warnings.push(format!("вырожденный контур на слое \"{layer}\" пропущен"));
+                warnings.push(format!("degenerate contour on layer \"{layer}\" skipped"));
             }
             ok
         })
@@ -180,13 +180,13 @@ fn assemble(
             let on_outer: HashSet<(u64, u64)> = b.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect();
             open.retain(|(c, _)| !c.iter().all(|p| on_outer.contains(&(p.x.to_bits(), p.y.to_bits()))));
             warnings.push(format!(
-                "внешний контур собран из незамкнутых кусков с разрывами до {} мм (--close-gaps)",
+                "outer contour assembled from open pieces with gaps up to {} mm (--close-gaps)",
                 opts.close_gaps
             ));
             b
         }
         _ if rings.is_empty() => bail!(
-            "в чертеже нет замкнутых контуров; если контур разорван, увеличьте --close-gaps (сейчас {} мм)",
+            "no closed contours in the drawing; if the outline is broken, raise --close-gaps (now {} mm)",
             opts.close_gaps
         ),
         _ => rings.remove(0).0,
@@ -198,8 +198,8 @@ fn assemble(
     for (ring, layer) in rings {
         if !ring.iter().all(|&p| inside(p)) {
             bail!(
-                "контур на слое \"{layer}\" (площадь {:.1} мм²) не лежит внутри внешнего контура: в файле должна быть одна деталь \
-                 (если внешний контур разорван, увеличьте --close-gaps, сейчас {} мм)",
+                "contour on layer \"{layer}\" (area {:.1} mm²) is not inside the outer contour: a file must hold one part \
+                 (if the outline is broken, raise --close-gaps, now {} mm)",
                 signed_area(&ring).abs(),
                 opts.close_gaps
             );
@@ -209,7 +209,7 @@ fn assemble(
     let outside = open.iter().filter(|(c, _)| !c.iter().all(|&p| inside(p))).count();
     if outside > 0 {
         bail!(
-            "{outside} незамкнутых линий выходят за внешний контур: вероятно, он разорван сильнее, чем --close-gaps ({} мм)",
+            "{outside} open lines leave the outer contour: it is probably broken by more than --close-gaps ({} mm)",
             opts.close_gaps
         );
     }
@@ -222,7 +222,7 @@ fn dist_to_ring(p: Pt, ring: &[Pt]) -> f64 {
     (0..ring.len()).map(|i| dist_to_segment(p, ring[i], ring[(i + 1) % ring.len()])).fold(f64::INFINITY, f64::min)
 }
 
-/// Аффинное преобразование 2D: [a b c; d e f].
+/// 2D affine transform: [a b c; d e f].
 #[derive(Debug, Clone, Copy)]
 struct Affine([f64; 6]);
 
@@ -236,7 +236,7 @@ impl Affine {
         Pt::new(m[0] * p.x + m[1] * p.y + m[2], m[3] * p.x + m[4] * p.y + m[5])
     }
 
-    /// self ∘ other: сначала other, потом self.
+    /// self ∘ other: other first, then self.
     fn then_inner(&self, o: &Affine) -> Affine {
         let (a, b) = (&self.0, &o.0);
         Affine([
@@ -249,14 +249,14 @@ impl Affine {
         ])
     }
 
-    /// Наибольший коэффициент растяжения, чтобы пересчитать допуск в локальные единицы.
+    /// Largest stretch factor, used to convert the tolerance into local units.
     fn max_stretch(&self) -> f64 {
         let m = &self.0;
         m[0].hypot(m[3]).max(m[1].hypot(m[4])).max(1e-12)
     }
 }
 
-/// Объекты с нормалью (0,0,-1) лежат в OCS, где ось X направлена в обратную сторону.
+/// Entities with normal (0,0,-1) live in an OCS whose X axis is flipped.
 fn ocs(normal_z: f64) -> Affine {
     if normal_z < 0.0 {
         Affine([-1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
@@ -268,7 +268,7 @@ fn ocs(normal_z: f64) -> Affine {
 struct Collector<'a> {
     drawing: &'a Drawing,
     opts: &'a ImportOptions,
-    /// Полилинии в мм вместе со слоем.
+    /// Polylines in mm with their layer.
     pieces: Vec<(Vec<Pt>, String)>,
     skipped: BTreeMap<&'static str, usize>,
     warnings: &'a mut Vec<String>,
@@ -276,7 +276,7 @@ struct Collector<'a> {
 
 impl Collector<'_> {
     fn entity(&mut self, e: &Entity, xf: &Affine, parent_layer: Option<&str>, depth: usize) -> Result<()> {
-        // Объекты блока на слое "0" наследуют слой вставки.
+        // Block entities on layer "0" take the layer of the insert.
         let layer = match parent_layer {
             Some(pl) if e.common.layer == "0" => pl.to_string(),
             _ => e.common.layer.clone(),
@@ -308,7 +308,7 @@ impl Collector<'_> {
             }
             EntityType::Polyline(pl) => {
                 if pl.is_3d_polygon_mesh() || pl.is_polyface_mesh() {
-                    bail!("слой \"{layer}\": POLYLINE-сетки (3D mesh/polyface) не поддерживаются");
+                    bail!("layer \"{layer}\": POLYLINE meshes (3D mesh/polyface) are not supported");
                 }
                 let verts: Vec<(Pt, f64)> = pl
                     .vertices()
@@ -340,18 +340,18 @@ impl Collector<'_> {
 
     fn insert(&mut self, ins: &dxf::entities::Insert, xf: &Affine, layer: &str, depth: usize) -> Result<()> {
         if depth > 16 {
-            bail!("слишком глубокая вложенность блоков (INSERT \"{}\")", ins.name);
+            bail!("blocks nested too deep (INSERT \"{}\")", ins.name);
         }
         let Some(block) = self.drawing.blocks().find(|b| b.name == ins.name) else {
-            bail!("блок \"{}\" не найден", ins.name);
+            bail!("block \"{}\" not found", ins.name);
         };
         if ins.row_count > 1 || ins.column_count > 1 {
-            bail!("массивы MINSERT (блок \"{}\") не поддерживаются", ins.name);
+            bail!("MINSERT arrays (block \"{}\") are not supported", ins.name);
         }
         let (s, c) = ins.rotation.to_radians().sin_cos();
         let (sx, sy) = (ins.x_scale_factor, ins.y_scale_factor);
         let (bx, by) = (block.base_point.x, block.base_point.y);
-        // p' = location + R · S · (p − base), в OCS вставки.
+        // p' = location + R · S · (p − base), in the insert's OCS.
         let local = Affine([
             c * sx,
             -s * sy,
@@ -384,17 +384,17 @@ fn entity_kind(e: &EntityType) -> &'static str {
         EntityType::Attribute(_) => "ATTRIB",
         EntityType::AttributeDefinition(_) => "ATTDEF",
         EntityType::Solid(_) => "SOLID",
-        _ => "прочие",
+        _ => "other",
     }
 }
 
-/// Число отрезков для дуги радиуса r и угла sweep при допуске tol по хорде.
+/// Segment count for an arc of radius r and angle sweep at chord tolerance tol.
 fn arc_segments(r: f64, sweep: f64, tol: f64) -> usize {
     let step = if tol >= r { PI / 2.0 } else { 2.0 * (1.0 - tol / r).acos() };
     ((sweep.abs() / step).ceil() as usize).max(1)
 }
 
-/// Точки дуги от start на угол sweep (знак задаёт направление), включая оба конца.
+/// Arc points from start over sweep (sign gives direction), both ends included.
 pub fn arc_points(center: Pt, r: f64, start: f64, sweep: f64, tol: f64) -> Vec<Pt> {
     let n = arc_segments(r, sweep, tol).max(if (sweep.abs() - TAU).abs() < 1e-9 { 8 } else { 1 });
     (0..=n)
@@ -405,7 +405,7 @@ pub fn arc_points(center: Pt, r: f64, start: f64, sweep: f64, tol: f64) -> Vec<P
         .collect()
 }
 
-/// Полилиния с bulge (tan(θ/4)) → точки. Замкнутая получает в конце повтор первой точки.
+/// Polyline with bulges (tan(θ/4)) -> points. A closed one ends with its first point repeated.
 fn bulge_polyline(verts: &[(Pt, f64)], closed: bool, tol: f64) -> Vec<Pt> {
     let n = verts.len();
     if n == 0 {
@@ -425,7 +425,7 @@ fn bulge_polyline(verts: &[(Pt, f64)], closed: bool, tol: f64) -> Vec<Pt> {
         let r = c / (2.0 * (theta / 2.0).sin()).abs();
         let mid = Pt::new((p0.x + p1.x) / 2.0, (p0.y + p1.y) / 2.0);
         let (dx, dy) = ((p1.x - p0.x) / c, (p1.y - p0.y) / c);
-        // Центр смещён от середины хорды влево (для b > 0) на (c/2)·(1 − b²)/(2b).
+        // The centre is left of the chord midpoint (for b > 0) by (c/2)·(1 − b²)/(2b).
         let h = (c / 2.0) * (1.0 - b * b) / (2.0 * b);
         let center = Pt::new(mid.x - dy * h, mid.y + dx * h);
         let start = (p0.y - center.y).atan2(p0.x - center.x);
@@ -467,15 +467,15 @@ fn spline_points(sp: &dxf::entities::Spline, tol: f64, layer: &str, warnings: &m
     let ctrl: Vec<Pt> = sp.control_points.iter().map(p2).collect();
     if ctrl.is_empty() {
         if sp.fit_points.len() >= 2 {
-            warnings.push(format!("слой \"{layer}\": SPLINE без контрольных точек, беру точки интерполяции как полилинию"));
+            warnings.push(format!("layer \"{layer}\": SPLINE without control points, using its fit points as a polyline"));
             return Ok(sp.fit_points.iter().map(p2).collect());
         }
-        bail!("слой \"{layer}\": пустой SPLINE");
+        bail!("layer \"{layer}\": empty SPLINE");
     }
     let knots = &sp.knot_values;
     if knots.len() != ctrl.len() + p + 1 {
         bail!(
-            "слой \"{layer}\": SPLINE с неверным числом узлов ({} при {} точках и степени {p})",
+            "layer \"{layer}\": SPLINE with a wrong knot count ({} for {} points of degree {p})",
             knots.len(),
             ctrl.len()
         );
@@ -487,7 +487,7 @@ fn spline_points(sp: &dxf::entities::Spline, tol: f64, layer: &str, warnings: &m
     };
     let nurbs = Nurbs { p, ctrl: &ctrl, weights: &weights, knots };
     let mut out = vec![nurbs.eval(knots[p])];
-    // Каждый ненулевой пролёт узлов делим на 4 части и уточняем рекурсивно по отклонению хорды.
+    // Each non-empty knot span is split in 4 and refined recursively by chord deviation.
     for w in knots[p..=ctrl.len()].windows(2) {
         if w[1] - w[0] <= 1e-12 {
             continue;
@@ -509,7 +509,7 @@ struct Nurbs<'a> {
 }
 
 impl Nurbs<'_> {
-    /// Алгоритм де Бура в однородных координатах.
+    /// De Boor's algorithm in homogeneous coordinates.
     fn eval(&self, t: f64) -> Pt {
         let (p, n) = (self.p, self.ctrl.len());
         let k = self.knots;
@@ -559,8 +559,8 @@ fn dist_to_segment(p: Pt, a: Pt, b: Pt) -> f64 {
     p.dist(Pt::new(a.x + t * dx, a.y + t * dy))
 }
 
-/// Сшивает куски в замкнутые контуры. Возвращает (замкнутые, незамкнутые).
-/// Куски короче допуска отбрасываются: их концы и так считаются совпадающими.
+/// Joins pieces into closed contours. Returns (closed, open).
+/// Pieces shorter than the tolerance are dropped: their ends count as coincident anyway.
 #[allow(clippy::type_complexity)]
 fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<(Vec<Pt>, String)>) {
     let mut closed = Vec::new();
@@ -576,7 +576,7 @@ fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<
             open.push((pts, layer));
         }
     }
-    // Ближайший к точке p конец среди оставшихся кусков: (индекс, совпал конец, а не начало).
+    // Nearest piece end to p among the remaining pieces: (index, matched its end rather than start).
     let nearest = |open: &[(Vec<Pt>, String)], p: Pt| -> Option<(usize, bool)> {
         open.iter()
             .enumerate()
@@ -592,7 +592,7 @@ fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<
             let (start, end) = (cur[0], *cur.last().unwrap());
             let closing = start.dist(end);
             let next = nearest(&open, end);
-            // Замыкаем, если начало цепочки ближе любого продолжения.
+            // Close the ring if its start is nearer than any continuation.
             let next_dist = next.map(|(i, rev)| {
                 let q = &open[i].0;
                 if rev { q.last().unwrap().dist(end) } else { q[0].dist(end) }
@@ -610,7 +610,7 @@ fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<
                     cur.extend_from_slice(&q[1..]);
                 }
                 None if !reversed_once => {
-                    // Продолжение может быть с другого конца.
+                    // The continuation may be at the other end.
                     reversed_once = true;
                     cur.reverse();
                 }
@@ -624,7 +624,7 @@ fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<
     (closed, leftover)
 }
 
-/// Убирает замыкающую точку и подряд идущие дубликаты.
+/// Drops the closing point and consecutive duplicates.
 fn finish_ring(mut pts: Vec<Pt>) -> Ring {
     pts.pop();
     let mut out: Ring = Vec::with_capacity(pts.len());
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn bulge_half_circle() {
-        // Полуокружность r=10 от (0,0) до (20,0) с bulge 1 (против часовой): проходит через (10,-10).
+        // Half circle r=10 from (0,0) to (20,0) with bulge 1 (counter-clockwise) passes through (10,-10).
         let pts = bulge_polyline(&[(Pt::new(0.0, 0.0), 1.0), (Pt::new(20.0, 0.0), 0.0)], false, 0.01);
         assert!(pts.iter().all(|p| (p.dist(Pt::new(10.0, 0.0)) - 10.0).abs() < 1e-9));
         assert!(pts.iter().any(|p| p.dist(Pt::new(10.0, -10.0)) < 1e-6));

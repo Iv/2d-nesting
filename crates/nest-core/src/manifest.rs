@@ -1,4 +1,4 @@
-//! Манифест количеств и загрузка папки с деталями.
+//! Quantity manifest and loading of a parts folder.
 //!
 //! `parts.toml`:
 //! ```toml
@@ -6,7 +6,7 @@
 //! front = 2
 //! sleeve = { qty = 4 }
 //! ```
-//! `parts.csv`: строки `имя,количество`, первая строка может быть заголовком.
+//! `parts.csv`: rows `name,qty`; the first row may be a header.
 
 use crate::dxf_in::{read_part, ImportOptions};
 use crate::geom::Demand;
@@ -31,16 +31,16 @@ enum TomlQty {
     Table { qty: usize },
 }
 
-/// Количество по имени детали.
+/// Quantity by part name.
 pub type Quantities = BTreeMap<String, usize>;
 
 pub fn read_manifest(path: &Path) -> Result<Quantities> {
-    let text = fs::read_to_string(path).with_context(|| format!("{}: не удалось прочитать", path.display()))?;
+    let text = fs::read_to_string(path).with_context(|| format!("{}: cannot read", path.display()))?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "toml" => parse_toml(&text),
         "csv" => parse_csv(&text),
-        _ => bail!("неизвестный формат манифеста (нужен .toml или .csv)"),
+        _ => bail!("unknown manifest format (expected .toml or .csv)"),
     }
     .with_context(|| format!("{}", path.display()))
 }
@@ -75,20 +75,20 @@ fn parse_csv(text: &str) -> Result<Quantities> {
         match qty.parse::<usize>() {
             Ok(q) => {
                 if out.insert(name.to_string(), q).is_some() {
-                    bail!("строка {}: деталь \"{name}\" указана дважды", i + 1);
+                    bail!("line {}: part \"{name}\" is listed twice", i + 1);
                 }
             }
-            Err(_) if i == 0 => {} // заголовок
-            Err(_) => bail!("строка {}: количество \"{qty}\" не число", i + 1),
+            Err(_) if i == 0 => {} // header
+            Err(_) => bail!("line {}: quantity \"{qty}\" is not a number", i + 1),
         }
     }
     Ok(out)
 }
 
-/// Все DXF папки в порядке имён.
+/// All DXF files of a folder, sorted by name.
 pub fn dxf_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .with_context(|| format!("{}: не удалось открыть папку", dir.display()))?
+        .with_context(|| format!("{}: cannot open directory", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dxf")))
         .collect();
@@ -96,7 +96,7 @@ pub fn dxf_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Читает папку: детали + количества из манифеста (если он есть). Ошибки всех файлов собираются вместе.
+/// Reads a folder: parts plus quantities from the manifest, if any. Errors of all files are reported together.
 pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
     let manifest_path = MANIFEST_NAMES.iter().map(|n| dir.join(n)).find(|p| p.is_file());
     let mut qtys = match &manifest_path {
@@ -105,7 +105,7 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
     };
     let files = dxf_files(dir)?;
     if files.is_empty() {
-        bail!("{}: нет DXF-файлов", dir.display());
+        bail!("{}: no DXF files", dir.display());
     }
     let mut demands = Vec::new();
     let mut errors = Vec::new();
@@ -115,7 +115,7 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
                 let qty = match qtys.as_mut() {
                     None => 1,
                     Some(q) => q.remove(&part.name).unwrap_or_else(|| {
-                        warn!("деталь \"{}\" нет в манифесте, количество = 1", part.name);
+                        warn!("part \"{}\" is not in the manifest, quantity = 1", part.name);
                         1
                     }),
                 };
@@ -124,7 +124,7 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
                 }
             }
             Err(e) => {
-                // Деталь есть, просто не прочиталась: не считать её «отсутствующей» в манифесте.
+                // The file exists but failed to read: do not also report it as missing from the manifest.
                 if let (Some(q), Some(stem)) = (qtys.as_mut(), f.file_stem()) {
                     q.remove(stem.to_string_lossy().as_ref());
                 }
@@ -136,12 +136,12 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
         && !q.is_empty()
     {
         errors.push(format!(
-            "в манифесте есть детали без DXF-файла: {}",
+            "manifest lists parts without a DXF file: {}",
             q.keys().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
     if !errors.is_empty() {
-        bail!("ошибки во входных данных:\n  {}", errors.join("\n  "));
+        bail!("input errors:\n  {}", errors.join("\n  "));
     }
     Ok(demands)
 }

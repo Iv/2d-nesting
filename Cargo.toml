@@ -30,13 +30,13 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-# sparrow тяжёлый по вычислениям: тесты в оптимизированной сборке.
+# sparrow is compute-heavy: run tests optimised.
 [profile.test]
 opt-level = 3
 
-# Отладочные проверки sparrow очень дорогие (сверка трекера после каждого хода), и одна из них
-# (`weighted loss should never increase`, worker.rs) срабатывает на длинных смешанных прогонах.
-# Корректность раскладки подтверждает наша независимая проверка (validate.rs).
+# sparrow's debug assertions are very expensive (tracker re-check after every move), and one of them
+# (`weighted loss should never increase`, worker.rs) fires on long mixed runs.
+# Layout correctness is confirmed by our independent validation (validate.rs).
 [profile.test.package.sparrow]
 debug-assertions = false
 

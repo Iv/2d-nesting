@@ -8,102 +8,110 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Раскладка лекал на ткань (2D strip packing), вход и выход DXF.
+/// Nesting of pattern pieces on fabric (2D strip packing), DXF in and out.
 #[derive(Parser, Debug)]
 #[command(name = "nest", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 
-    /// Подробный вывод (повторите для отладки солвера)
+    /// Verbose output (repeat for solver debug output)
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Разложить детали: папка DXF (одна деталь = один файл) → DXF отреза и отчёт
+    /// Nest parts: a folder of DXF files (one part per file) -> sheet DXF and report
     Run(RunArgs),
-    /// Сохранить блоки сборочного DXF в отдельные файлы-детали
+    /// Save blocks of an assembly DXF as separate part files
     Extract(ExtractArgs),
 }
 
 #[derive(Args, Debug)]
 struct ExtractArgs {
-    /// Сборочный DXF, где каждая деталь в своём блоке
+    /// Assembly DXF with every part in its own block
     input: PathBuf,
 
-    /// Шаблоны имён блоков через запятую (* и ?), например "rib*"
+    /// Comma-separated block name patterns (* and ?), e.g. "rib*"
     #[arg(short, long, value_delimiter = ',', required = true)]
     blocks: Vec<String>,
 
-    /// Папка для файлов деталей и parts.toml
+    /// Output folder for the part files and parts.toml
     #[arg(short, long)]
     out: PathBuf,
 }
 
 #[derive(Args, Debug)]
 struct RunArgs {
-    /// Папка с DXF-деталями и необязательным манифестом parts.toml / parts.csv
+    /// Folder with part DXF files and an optional parts.toml / parts.csv manifest
     input: PathBuf,
 
-    /// Папка для результатов (sheet_N.dxf, report.txt)
+    /// Output folder (sheet_N.dxf, report.txt)
     #[arg(short, long, default_value = "out")]
     out: PathBuf,
 
-    /// Ширина ткани, мм
+    /// Fabric width, mm
     #[arg(long, default_value_t = 1560.0)]
     width: f64,
 
-    /// Максимальная длина отреза, мм (при превышении — предупреждение)
+    /// Maximum sheet length, mm (exceeding it gives a warning)
     #[arg(long, default_value_t = 5800.0)]
     max_length: f64,
 
-    /// Зазор между деталями, мм
+    /// Gap between parts, mm
     #[arg(short, long, default_value_t = 0.0)]
     gap: f64,
 
-    /// Разрешённые углы поворота через запятую, градусы ("0" — без поворотов)
-    #[arg(short, long, default_value = "0,180", value_delimiter = ',')]
+    /// Comma-separated allowed rotation angles, degrees ("0" disables rotation)
+    #[arg(short, long, default_value = "0,90,180,270", value_delimiter = ',')]
     rotations: Vec<f64>,
 
-    /// Время поиска, секунды
+    /// Rotation tolerance around each base angle, ± degrees (e.g. 10)
+    #[arg(long, default_value_t = 0.0)]
+    rotation_tolerance: f64,
+
+    /// Rotation step within the tolerance, degrees
+    #[arg(long, default_value_t = 1.0)]
+    rotation_step: f64,
+
+    /// Search time, seconds
     #[arg(short, long, default_value_t = 60.0, conflicts_with = "iterations")]
     time_limit: f64,
 
-    /// Вместо времени — фиксированное число итераций: с тем же seed результат повторяется
+    /// Fixed iteration budget instead of time: the same seed gives the same layout
     #[arg(short, long)]
     iterations: Option<usize>,
 
-    /// Seed генератора случайных чисел
+    /// Random seed
     #[arg(short, long)]
     seed: Option<u64>,
 
-    /// Число потоков солвера (для воспроизводимости держите одинаковым)
+    /// Solver worker threads (keep it fixed for reproducibility)
     #[arg(short, long, default_value_t = 3)]
     workers: usize,
 
-    /// Допуск аппроксимации дуг и сплайнов, мм
+    /// Arc and spline approximation tolerance, mm
     #[arg(long, default_value_t = 0.2)]
     tolerance: f64,
 
-    /// Допуск сшивки концов отрезков в контур, мм
+    /// Tolerance for joining segment ends into contours, mm
     #[arg(long, default_value_t = 0.05)]
     join_tolerance: f64,
 
-    /// Читать только эти слои DXF (через запятую)
+    /// Read only these DXF layers (comma-separated)
     #[arg(long, value_delimiter = ',')]
     layers: Option<Vec<String>>,
 
-    /// Пропускать эти слои DXF (через запятую)
+    /// Skip these DXF layers (comma-separated)
     #[arg(long, value_delimiter = ',')]
     ignore_layers: Vec<String>,
 
-    /// Максимальный разрыв, который закрывается при сборке внешнего контура из кусков, мм
+    /// Largest gap bridged when assembling the outer contour from pieces, mm
     #[arg(long, default_value_t = 1.0)]
     close_gaps: f64,
 
-    /// Считать ошибкой любую незамкнутую линию, даже внутри детали
+    /// Treat any open line as an error, even inside a part
     #[arg(long)]
     strict_open: bool,
 }
@@ -126,7 +134,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
         Err(e) => {
-            eprintln!("Ошибка: {e:#}");
+            eprintln!("Error: {e:#}");
             ExitCode::FAILURE
         }
     }
@@ -135,21 +143,21 @@ fn main() -> ExitCode {
 fn extract(args: ExtractArgs) -> Result<()> {
     let blocks = nest_core::extract::extract_blocks(&args.input, &args.blocks, &args.out)?;
     for b in &blocks {
-        println!("{:<24} вставок в чертеже: {:>2}  → {}", b.name, b.inserts, b.path.display());
+        println!("{:<24} inserts in drawing: {:>2}  -> {}", b.name, b.inserts, b.path.display());
     }
-    println!("Сохранено деталей: {}. Количества задайте в {}", blocks.len(), args.out.join("parts.toml").display());
+    println!("Saved {} parts. Set quantities in {}", blocks.len(), args.out.join("parts.toml").display());
     Ok(())
 }
 
 fn run(cli: RunArgs) -> Result<bool> {
     if !(cli.time_limit > 0.0) {
-        bail!("--time-limit должен быть больше нуля");
+        bail!("--time-limit must be positive");
     }
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let c = cancel.clone();
         ctrlc::set_handler(move || {
-            eprintln!("прерывание: перехожу к следующей фазе / завершаю");
+            eprintln!("interrupted: moving to the next phase / stopping");
             c.store(true, Ordering::SeqCst);
         })?;
     }
@@ -167,6 +175,8 @@ fn run(cli: RunArgs) -> Result<bool> {
         max_length: cli.max_length,
         gap: cli.gap,
         rotations: cli.rotations,
+        rotation_tolerance: cli.rotation_tolerance,
+        rotation_step: cli.rotation_step,
         budget: match cli.iterations {
             Some(n) => Budget::Iterations(n),
             None => Budget::Time(Duration::from_secs_f64(cli.time_limit)),
@@ -179,13 +189,13 @@ fn run(cli: RunArgs) -> Result<bool> {
     let out = nest_core::run(&cli.input, &cli.out, &import, &params)?;
     println!("{}", out.report);
     for f in &out.sheet_files {
-        println!("Записан {}", f.display());
+        println!("Wrote {}", f.display());
     }
-    println!("Записан {}", cli.out.join("report.txt").display());
+    println!("Wrote {}", cli.out.join("report.txt").display());
     for (i, s) in out.outcome.result.sheets.iter().enumerate() {
         if s.length > params.max_length {
             eprintln!(
-                "ВНИМАНИЕ: отрез {} длиной {:.1} мм больше максимальной {:.0} мм",
+                "WARNING: sheet {} is {:.1} mm long, more than the maximum {:.0} mm",
                 i + 1,
                 s.length,
                 params.max_length
@@ -193,7 +203,7 @@ fn run(cli: RunArgs) -> Result<bool> {
         }
     }
     if !out.valid() {
-        eprintln!("ОШИБКА ПРОВЕРКИ: раскладка содержит нарушения, см. отчёт");
+        eprintln!("VALIDATION ERROR: the layout has violations, see the report");
     }
     Ok(out.valid())
 }

@@ -1,4 +1,4 @@
-//! Запись отреза в DXF: слой SHEET (прямоугольник отреза), PARTS (контуры деталей), LABELS (имена).
+//! Writes a sheet to DXF: layer SHEET (sheet rectangle), PARTS (part geometry), LABELS (names).
 
 use crate::geom::{point_in_ring, Demand, Pt, Ring, Shape, Sheet};
 use anyhow::{Context, Result};
@@ -43,7 +43,7 @@ pub fn write_sheet(path: &Path, demands: &[Demand], sheet: &Sheet) -> Result<()>
         d.add_entity(label(&part.name, &s));
     }
 
-    d.save_file(path).with_context(|| format!("{}: не удалось записать DXF", path.display()))
+    d.save_file(path).with_context(|| format!("{}: cannot write DXF", path.display()))
 }
 
 fn polyline(ring: &Ring, layer: &str) -> Entity {
@@ -73,7 +73,7 @@ fn label(name: &str, s: &Shape) -> Entity {
         );
         poly.interior_point().map(|p| Pt::new(p.x(), p.y())).unwrap_or(b.center())
     });
-    // Высота текста: так, чтобы имя примерно помещалось в деталь.
+    // Text height chosen so the name roughly fits inside the part.
     let chars = name.chars().count().max(1) as f64;
     let height = (b.width() / (chars * 0.8)).min(b.height() * 0.25).clamp(2.0, 40.0);
     let at = Point::new(center.x, center.y, 0.0);

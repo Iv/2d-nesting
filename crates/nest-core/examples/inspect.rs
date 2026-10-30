@@ -1,4 +1,4 @@
-//! Структура DXF: объекты по слоям и типам в model space, список блоков с размерами и текстами.
+//! DXF structure: model-space entities by layer and type, list of blocks with sizes and texts.
 use dxf::entities::EntityType;
 use dxf::Drawing;
 use std::collections::BTreeMap;
@@ -8,7 +8,7 @@ fn kind(e: &EntityType) -> String {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("путь к DXF");
+    let path = std::env::args().nth(1).expect("path to a DXF");
     let d = Drawing::load_file(&path).unwrap();
     println!("units {:?}, version {:?}", d.header.default_drawing_units, d.header.version);
     let mut ms: BTreeMap<(String, String), usize> = BTreeMap::new();

@@ -11,9 +11,9 @@ fn fixtures_import_with_expected_areas() {
     for (name, area) in write_fixtures(dir.path()) {
         let part = read_part(&dir.path().join(format!("{name}.dxf")), &opts).unwrap();
         let got = part.shape.net_area();
-        // Хорды лежат внутри дуг, поэтому площадь кривых немного меньше точной.
+        // Chords lie inside arcs, so curved areas come out slightly smaller.
         let rel = (got - area).abs() / area;
-        assert!(rel < 0.005, "{name}: площадь {got:.1}, ожидалось {area:.1}");
+        assert!(rel < 0.005, "{name}: area {got:.1}, expected {area:.1}");
         assert_eq!(part.name, name);
     }
 }
@@ -44,7 +44,7 @@ fn chord_error_respects_tolerance() {
         for (i, p) in ring.iter().enumerate() {
             let q = ring[(i + 1) % ring.len()];
             let mid = ((p.x + q.x) / 2.0).hypot((p.y + q.y) / 2.0);
-            assert!(500.0 - mid <= tol + 1e-9, "tol {tol}: отклонение {}", 500.0 - mid);
+            assert!(500.0 - mid <= tol + 1e-9, "tol {tol}: deviation {}", 500.0 - mid);
         }
     }
 }
@@ -66,10 +66,10 @@ fn open_contour_is_reported_with_file_and_layer() {
     let strict = ImportOptions { allow_open_inside: false, ..Default::default() };
     let err = format!("{:#}", read_part(&dir.path().join("broken.dxf"), &strict).unwrap_err());
     assert!(err.contains("broken.dxf"), "{err}");
-    assert!(err.contains("незамкнут"), "{err}");
+    assert!(err.contains("open contours"), "{err}");
     assert!(err.contains("CUT") && err.contains("GRAIN"), "{err}");
 
-    // После исключения слоя GRAIN остаётся только незамкнутый CUT.
+    // With GRAIN ignored only the open CUT remains.
     let opts = ImportOptions { ignore_layers: vec!["grain".into()], allow_open_inside: false, ..Default::default() };
     let err = format!("{:#}", read_part(&dir.path().join("broken.dxf"), &opts).unwrap_err());
     assert!(!err.contains("GRAIN"), "{err}");
@@ -101,7 +101,7 @@ fn second_part_in_file_is_an_error() {
         vec![on("0", rect(0.0, 0.0, 100.0, 100.0)), on("0", rect(200.0, 0.0, 50.0, 50.0))],
     );
     let err = format!("{:#}", read_part(&dir.path().join("pair.dxf"), &ImportOptions::default()).unwrap_err());
-    assert!(err.contains("не лежит внутри"), "{err}");
+    assert!(err.contains("is not inside"), "{err}");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn open_lines_inside_are_kept_and_nested_contours_allowed() {
         vec![
             on("0", rect(0.0, 0.0, 300.0, 100.0)),
             on("0", rect(20.0, 20.0, 100.0, 60.0)),
-            on("0", rect(40.0, 40.0, 20.0, 20.0)), // контур внутри выреза
+            on("0", rect(40.0, 40.0, 20.0, 20.0)), // contour inside a cut-out
             on("0", line((150.0, 10.0), (150.0, 90.0))),
         ],
     );
@@ -123,7 +123,7 @@ fn open_lines_inside_are_kept_and_nested_contours_allowed() {
     assert!((s.area() - 30_000.0).abs() < 1e-6);
     assert!((s.net_area() - (30_000.0 - 6000.0 + 400.0)).abs() < 1e-6);
 
-    // Разорванный внешний контур не маскируется под «линию внутри».
+    // A torn outer contour must not pass as an inner line.
     save(
         dir.path(),
         "torn",
@@ -136,5 +136,5 @@ fn open_lines_inside_are_kept_and_nested_contours_allowed() {
         ],
     );
     let err = format!("{:#}", read_part(&dir.path().join("torn.dxf"), &ImportOptions::default()).unwrap_err());
-    assert!(err.contains("выходят за"), "{err}");
+    assert!(err.contains("leave the outer contour"), "{err}");
 }

@@ -1,4 +1,4 @@
-//! Генератор синтетических DXF для тестов.
+//! Synthetic DXF generator for tests.
 #![allow(dead_code)]
 
 use dxf::entities::{Arc, Circle, Ellipse, Entity, EntityType, Line, LwPolyline, Spline};
@@ -13,7 +13,7 @@ pub fn on(layer: &str, specific: EntityType) -> Entity {
     e
 }
 
-/// Замкнутая LWPOLYLINE; `bulges[i]` относится к сегменту i → i+1.
+/// LWPOLYLINE; `bulges[i]` applies to segment i -> i+1.
 pub fn lwpoly(pts: &[(f64, f64)], bulges: &[f64], closed: bool) -> EntityType {
     let mut pl = LwPolyline::default();
     pl.set_is_closed(closed);
@@ -33,7 +33,7 @@ pub fn line(a: (f64, f64), b: (f64, f64)) -> EntityType {
     EntityType::Line(Line::new(Point::new(a.0, a.1, 0.0), Point::new(b.0, b.1, 0.0)))
 }
 
-/// Дуга против часовой стрелки, углы в градусах.
+/// Counter-clockwise arc, angles in degrees.
 pub fn arc(c: (f64, f64), r: f64, a0: f64, a1: f64) -> EntityType {
     EntityType::Arc(Arc::new(Point::new(c.0, c.1, 0.0), r, a0, a1))
 }
@@ -53,7 +53,7 @@ pub fn ellipse(c: (f64, f64), major: (f64, f64), ratio: f64) -> EntityType {
     })
 }
 
-/// Зажатый кубический B-сплайн по контрольным точкам.
+/// Clamped cubic B-spline through the given control points.
 pub fn spline(ctrl: &[(f64, f64)]) -> EntityType {
     let n = ctrl.len();
     let p = 3;
@@ -79,13 +79,13 @@ pub fn save(dir: &Path, name: &str, units: Units, entities: Vec<Entity>) {
     d.save_file(dir.join(format!("{name}.dxf"))).unwrap();
 }
 
-/// Набор деталей для тестов. Возвращает (имя, ожидаемая площадь, мм²).
+/// Test parts. Returns (name, expected net area in mm²).
 pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
     let mm = Units::Millimeters;
-    // Прямоугольник со смещением от начала координат.
+    // Rectangle away from the origin.
     save(dir, "rect", mm, vec![on("CUT", rect(1000.0, 2000.0, 300.0, 200.0))]);
 
-    // L-образная деталь из отдельных LINE в перемешанном порядке и направлении.
+    // L-shaped part from separate LINEs, shuffled and partly reversed.
     let l = [(0.0, 0.0), (300.0, 0.0), (300.0, 100.0), (100.0, 100.0), (100.0, 300.0), (0.0, 300.0)];
     let mut lines: Vec<Entity> = (0..6).map(|i| on("CUT", line(l[i], l[(i + 1) % 6]))).collect();
     lines.swap(0, 3);
@@ -95,7 +95,7 @@ pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
     }
     save(dir, "lshape", mm, lines);
 
-    // Рамка с двумя отверстиями: круг и прямоугольник.
+    // Frame with two holes: a circle and a rectangle.
     save(
         dir,
         "frame",
@@ -107,7 +107,7 @@ pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
         ],
     );
 
-    // «Стадион» из LINE + ARC.
+    // "Stadium" from LINE + ARC.
     save(
         dir,
         "stadium",
@@ -120,7 +120,7 @@ pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
         ],
     );
 
-    // Прямоугольник со скруглёнными углами через bulge (tan(90°/4)).
+    // Rounded rectangle via bulge (tan(90°/4)).
     let b = (PI / 8.0).tan();
     save(
         dir,
@@ -136,10 +136,10 @@ pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
         )],
     );
 
-    // Эллипс.
+    // Ellipse.
     save(dir, "ellipse", mm, vec![on("CUT", ellipse((0.0, 0.0), (150.0, 0.0), 0.5))]);
 
-    // Деталь «D»: прямая + сплайн.
+    // "D" part: a line plus a spline.
     save(
         dir,
         "dee",
@@ -150,12 +150,12 @@ pub fn write_fixtures(dir: &Path) -> Vec<(&'static str, f64)> {
         ],
     );
 
-    // Прямоугольник 10 × 5 дюймов.
+    // 10 × 5 inch rectangle.
     save(dir, "inch", Units::Inches, vec![on("0", rect(0.0, 0.0, 10.0, 5.0))]);
 
     let b_area = 200.0 * 150.0 - 4.0 * 20.0 * 20.0 + PI * 20.0 * 20.0;
-    // Сплайн с 4 точками = кубическая кривая Безье: x(t) = 600t(1−t), y(t) = 300(3t² − 2t³),
-    // площадь ∫x·y′dt = 1 080 000·∫t²(1−t)²dt = 36 000.
+    // A 4-point spline is a cubic Bézier: x(t) = 600t(1−t), y(t) = 300(3t² − 2t³),
+    // area ∫x·y′dt = 1 080 000·∫t²(1−t)²dt = 36 000.
     let dee_area = 36_000.0;
     vec![
         ("rect", 60_000.0),

@@ -1,4 +1,4 @@
-//! SVG-картинка контуров детали: замкнутые — чёрным, незамкнутые — красным.
+//! SVG picture of a part's contours: closed in black, open in red.
 use nest_core::dxf_in::{contours, ImportOptions};
 
 fn main() {

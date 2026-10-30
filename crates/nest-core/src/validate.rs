@@ -1,25 +1,25 @@
-//! Независимая проверка раскладки на исходной геометрии (crate geo), без кода солвера.
+//! Independent check of a layout on the original geometry (crate geo), without any solver code.
 
 use crate::geom::{BBox, Demand, Ring, Sheet};
 use geo::{Area, BooleanOps, Distance, Euclidean, LineString, Polygon};
 use std::fmt;
 
-/// Допуск на погрешность f32 в солвере, мм.
+/// Allowance for the solver's f32 rounding, mm.
 pub const EPS: f64 = 0.01;
 
 #[derive(Debug, Clone)]
 pub enum Violation {
-    /// Деталь выходит за пределы листа на `by` мм.
+    /// A part sticks out of the sheet by `by` mm.
     OutOfSheet { item: usize, by: f64 },
-    /// Детали перекрываются на площади `area` мм².
+    /// Two parts overlap by `area` mm².
     Overlap { a: usize, b: usize, area: f64 },
-    /// Расстояние между деталями меньше зазора.
+    /// Two parts are closer than the gap.
     Gap { a: usize, b: usize, dist: f64 },
 }
 
 #[derive(Debug, Clone)]
 pub struct Validation {
-    /// Подписи размещений: "имя #номер_копии".
+    /// Placement labels: "name #copy".
     pub labels: Vec<String>,
     pub violations: Vec<Violation>,
     pub pairs_checked: usize,
@@ -34,20 +34,20 @@ impl Validation {
 impl fmt::Display for Validation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.ok() {
-            return write!(f, "проверка пройдена: {} деталей, {} пар проверено", self.labels.len(), self.pairs_checked);
+            return write!(f, "validation passed: {} parts, {} pairs checked", self.labels.len(), self.pairs_checked);
         }
-        writeln!(f, "проверка НЕ пройдена, нарушений: {}", self.violations.len())?;
+        writeln!(f, "validation FAILED, violations: {}", self.violations.len())?;
         for v in &self.violations {
             match *v {
                 Violation::OutOfSheet { item, by } => {
-                    writeln!(f, "  {} выходит за лист на {by:.3} мм", self.labels[item])?
+                    writeln!(f, "  {} sticks out of the sheet by {by:.3} mm", self.labels[item])?
                 }
                 Violation::Overlap { a, b, area } => {
-                    writeln!(f, "  {} и {} перекрываются ({area:.3} мм²)", self.labels[a], self.labels[b])?
+                    writeln!(f, "  {} and {} overlap ({area:.3} mm²)", self.labels[a], self.labels[b])?
                 }
                 Violation::Gap { a, b, dist } => writeln!(
                     f,
-                    "  {} и {}: расстояние {dist:.3} мм меньше зазора",
+                    "  {} and {}: distance {dist:.3} mm is below the gap",
                     self.labels[a], self.labels[b]
                 )?,
             }
@@ -62,7 +62,7 @@ fn ring_to_ls(r: &Ring) -> LineString<f64> {
     LineString::from(pts)
 }
 
-/// Проверяет: детали внутри листа, не пересекаются, расстояние между ними не меньше `gap`.
+/// Checks that parts are inside the sheet, do not overlap and are at least `gap` apart.
 pub fn validate_sheet(demands: &[Demand], sheet: &Sheet, gap: f64) -> Validation {
     let mut copy_no = vec![0usize; demands.len()];
     let mut labels = Vec::new();
@@ -73,7 +73,7 @@ pub fn validate_sheet(demands: &[Demand], sheet: &Sheet, gap: f64) -> Validation
         labels.push(format!("{} #{}", demands[p.part].part.name, copy_no[p.part]));
         let s = demands[p.part].part.shape.transformed(&p.transform);
         boxes.push(s.bbox());
-        // Раскладка идёт по внешнему контуру, вложение в отверстия не допускается.
+        // Nesting uses the outer contour; nothing may be placed inside holes.
         polys.push(Polygon::new(ring_to_ls(&s.outer), vec![]));
     }
 
@@ -141,7 +141,7 @@ mod tests {
         assert!(matches!(v.violations[..], [Violation::Overlap { .. }]));
         let v = validate_sheet(&d, &sheet(vec![at(95.0, 0.0)]), 0.0);
         assert!(matches!(v.violations[..], [Violation::OutOfSheet { .. }]));
-        // Касание при нулевом зазоре допустимо.
+        // Touching is fine with a zero gap.
         assert!(validate_sheet(&d, &sheet(vec![at(0.0, 0.0), at(10.0, 0.0)]), 0.0).ok());
     }
 }
