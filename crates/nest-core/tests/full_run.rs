@@ -45,7 +45,8 @@ fn full_run_with_gap_is_valid() {
     let input = job_dir();
     let out = tempfile::tempdir().unwrap();
     let p = params(3.0, vec![0.0, 180.0], 42);
-    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    let outlines = nest_core::dxf_out::OutputOptions { outlines: true };
+    let job = nest_core::run_with_fillers(input.path(), &[], out.path(), &ImportOptions::default(), &p, &outlines).unwrap();
 
     assert!(job.valid(), "{}", job.validations[0]);
     let sheet = &job.outcome.result.sheets[0];
@@ -166,6 +167,55 @@ fn left_copies_are_mirrored() {
 }
 
 #[test]
+fn parts_are_inserted_as_their_source_drawings() {
+    use nest_core::geom::{Pt, Transform};
+    let dir = tempfile::tempdir().unwrap();
+    // A panel drawn in cm at 7° to the X axis, with a label; it gets aligned and has a left copy.
+    let tilt = Transform { rotation_deg: 7.0, translation: Pt::new(5.0, 8.0) };
+    let corners: Vec<(f64, f64)> = [(0.0, 0.0), (120.0, 0.0), (115.0, 30.0), (3.0, 30.0)]
+        .iter()
+        .map(|&(x, y)| tilt.apply(Pt::new(x, y)))
+        .map(|p| (p.x, p.y))
+        .collect();
+    let text = dxf::entities::Text { value: "TOP1 L-12".into(), text_height: 2.5, location: dxf::Point::new(40.0, 15.0, 0.0), ..Default::default() };
+    save(dir.path(), "top1", dxf::enums::Units::Centimeters, vec![on("CUT", lwpoly(&corners, &[], true)), on("MARK", EntityType::Text(text))]);
+    fs::write(dir.path().join("parts.toml"), "[parts]\ntop1 = { qty = 2, left = 2 }\n").unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let p = NestParams { rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 3) };
+    let job = nest_core::run(dir.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    assert!(job.valid());
+    assert!(job.demands.iter().all(|d| d.part.drawn.rotation_deg.abs() > 6.9), "panels are aligned");
+
+    let mut inserted = 0;
+    for (sheet, file) in job.outcome.result.sheets.iter().zip(&job.sheet_files) {
+        let d = Drawing::load_file(file).unwrap();
+        let inserts: Vec<_> = d
+            .entities()
+            .filter_map(|e| if let EntityType::Insert(i) = &e.specific { Some(i) } else { None })
+            .collect();
+        assert_eq!(inserts.len(), sheet.placements.len());
+        assert!(d.entities().all(|e| matches!(e.specific, EntityType::Insert(_)) || e.common.layer == "SHEET"));
+        for (ins, pl) in inserts.iter().zip(&sheet.placements) {
+            let block = d.blocks().find(|b| b.name == ins.name).unwrap();
+            assert!(block.entities.iter().any(|e| matches!(&e.specific, EntityType::Text(t) if t.value == "TOP1 L-12")));
+            let EntityType::LwPolyline(cut) = &block.entities.iter().find(|e| e.common.layer == "CUT").unwrap().specific else { panic!() };
+            // Insert transform: scale (X negative = mirrored), rotate, move.
+            let (s, c) = ins.rotation.to_radians().sin_cos();
+            let placed = job.demands[pl.part].part.shape.transformed(&pl.transform);
+            for v in &cut.vertices {
+                let (x, y) = (v.x * ins.x_scale_factor, v.y * ins.y_scale_factor);
+                let q = Pt::new(c * x - s * y + ins.location.x, s * x + c * y + ins.location.y);
+                assert!(placed.outer.iter().any(|o| o.dist(q) < 1e-6), "{q:?} not on {:?}", placed.outer);
+            }
+            assert_eq!(ins.x_scale_factor < 0.0, job.demands[pl.part].part.name.ends_with("_L"));
+            inserted += 1;
+        }
+    }
+    assert_eq!(inserted, 4);
+}
+
+#[test]
 fn panels_are_kept_straight() {
     let p = NestParams { tilt_penalty: 10.0, rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 7) };
     assert!(p.is_panel("Top1_L") && p.is_panel("bot3") && !p.is_panel("rib1"));
@@ -190,11 +240,31 @@ fn panels_are_kept_straight() {
 }
 
 #[test]
+fn panel_tilt_is_limited() {
+    let p = NestParams {
+        tilt_penalty: 0.0,
+        panel_tolerance: 2.0,
+        rotation_tolerance: 10.0,
+        rotation_step: 2.0,
+        ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 11)
+    };
+    let input = panel_job();
+    let out = tempfile::tempdir().unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    assert!(job.valid());
+    for pl in job.outcome.result.sheets.iter().flat_map(|s| &s.placements) {
+        let name = &job.demands[pl.part].part.name;
+        assert!(!p.is_panel(name) || p.tilt(pl.transform.rotation_deg) <= 2.0 + 1e-6, "{name} at {}°", pl.transform.rotation_deg);
+    }
+    assert!(job.report.contains("Panel tilt limit:    2°"));
+}
+
+#[test]
 fn tilted_panels_are_aligned_to_their_long_axis() {
     use nest_core::geom::{Demand, Part, Pt, Shape, Transform};
     let strip = Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(1200.0, 0.0), Pt::new(1150.0, 300.0), Pt::new(30.0, 300.0)], vec![]);
     let drawn = strip.transformed(&Transform { rotation_deg: 7.0, translation: Pt::new(50.0, 80.0) });
-    let part = |name: &str, shape: &Shape| Demand { part: Part { name: name.into(), source: "x.dxf".into(), shape: shape.clone() }, qty: 1, filler: false };
+    let part = |name: &str, shape: &Shape| Demand { part: Part { name: name.into(), source: "x.dxf".into(), shape: shape.clone(), ..Default::default() }, qty: 1, filler: false };
     // A chunky panel and a rib keep their drawn angle.
     let square = Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(300.0, 40.0), Pt::new(260.0, 340.0), Pt::new(-40.0, 300.0)], vec![]);
     let mut demands = vec![part("top1", &drawn), part("top2", &square), part("rib1", &drawn), part("bot1", &strip)];
@@ -222,7 +292,7 @@ fn fillers_go_into_free_space_only() {
 
     let (o1, o2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let plain = nest_core::run(input.path(), o1.path(), &ImportOptions::default(), &p).unwrap();
-    let filled = nest_core::run_with_fillers(input.path(), &[fill.path().into()], o2.path(), &ImportOptions::default(), &p).unwrap();
+    let filled = nest_core::run_with_fillers(input.path(), &[fill.path().into()], o2.path(), &ImportOptions::default(), &p, &Default::default()).unwrap();
     assert!(filled.valid());
     let (a, b) = (&plain.outcome.result, &filled.outcome.result);
     // The same sheets (fillers come after them), none longer, and no new sheet.
@@ -243,7 +313,7 @@ fn fillers_go_into_free_space_only() {
 fn free_strip_on_top_is_not_counted() {
     use nest_core::geom::{Demand, Part, Placement, Pt, Shape, Transform};
     let shape = Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(1000.0, 0.0), Pt::new(1000.0, 1000.0), Pt::new(0.0, 1000.0)], vec![]);
-    let demands = vec![Demand { part: Part { name: "sq".into(), source: "sq.dxf".into(), shape }, qty: 1, filler: false }];
+    let demands = vec![Demand { part: Part { name: "sq".into(), source: "sq.dxf".into(), shape, ..Default::default() }, qty: 1, filler: false }];
     let at = |y: f64| vec![Placement { part: 0, transform: Transform { rotation_deg: 0.0, translation: Pt::new(0.0, y) } }];
     let p = NestParams { width: 1560.0, min_strip: 150.0, strip_ratio: 1.0, ..Default::default() };
     // 560 mm free on top: 1000 mm of length consume 1000 · 1000/1560.

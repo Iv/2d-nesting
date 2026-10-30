@@ -191,12 +191,29 @@ impl Transform {
     }
 }
 
+/// How a part's shape lies relative to its source drawing: the shape is the drawing scaled to mm,
+/// mirrored across the Y axis if `mirrored`, then turned by `rotation_deg` about the origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Drawn {
+    /// Drawing units to mm.
+    pub scale: f64,
+    pub mirrored: bool,
+    pub rotation_deg: f64,
+}
+
+impl Default for Drawn {
+    fn default() -> Self {
+        Self { scale: 1.0, mirrored: false, rotation_deg: 0.0 }
+    }
+}
+
 /// A part read from one DXF.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Part {
     pub name: String,
     pub source: PathBuf,
     pub shape: Shape,
+    pub drawn: Drawn,
 }
 
 /// A part and how many are needed.

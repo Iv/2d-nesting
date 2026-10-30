@@ -69,6 +69,10 @@ pub struct NestParams {
     /// used length. Among the layouts found, the one with the least length + penalty is kept.
     /// 0 turns the penalty off.
     pub tilt_penalty: f64,
+    /// Panels deviate from a base angle by at most this much, degrees (the general
+    /// `rotation_tolerance` still applies). Layouts with steeper panels would lose to the penalty
+    /// anyway, so the search does not spend time on them.
+    pub panel_tolerance: f64,
     /// Turn elongated panels so their long axis lies along a base angle before nesting (see
     /// [`align_panels`]). Off: the drawing's X axis is the panel's straight direction.
     pub align_panels: bool,
@@ -98,6 +102,7 @@ impl Default for NestParams {
             rotation_step: 1.0,
             panels: vec!["top".into(), "bot".into()],
             tilt_penalty: 10.0,
+            panel_tolerance: 3.0,
             align_panels: true,
             min_strip: 150.0,
             strip_ratio: 2.0,
@@ -201,6 +206,7 @@ pub fn align_panels(demands: &mut [Demand], params: &NestParams) -> Vec<(usize, 
             continue;
         }
         d.part.shape = d.part.shape.transformed(&Transform { rotation_deg: -off, translation: Pt::new(0.0, 0.0) });
+        d.part.drawn.rotation_deg -= off;
         turned.push((i, -off));
     }
     turned
@@ -281,6 +287,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
     let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
     let area = |i: usize| demands[i].part.shape.area();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
     let mut report = |sheet: usize, kind: String, pl: &[Placement]| {
@@ -435,7 +442,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         // compacted once more: a ragged right edge (typical right after the cut) would waste it.
         let compact = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
         report(sheet_no, "compact".into(), &compact);
-        if fits(&compact) && len_of(&compact) < len_of(&chosen) {
+        if fits(&compact) && len_of(&compact) + tilt_of(&compact) < len_of(&chosen) + tilt_of(&chosen) {
             chosen = compact;
         }
 
@@ -451,8 +458,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     // into narrower strips, and kept that way if it then consumes less fabric (tilt included).
     if params.min_strip > 0.0 {
         let cost = |pl: &[Placement]| {
-            params.consumed(demands, pl, len_of(pl))
-                + pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>()
+            params.consumed(demands, pl, len_of(pl)) + tilt_of(pl)
         };
         for (n, sheet) in sheets.iter_mut().enumerate() {
             let parts: f64 = sheet.placements.iter().map(|p| area(p.part)).sum();
@@ -523,6 +529,7 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
         let fitting: Vec<f64> = angles
             .iter()
             .copied()
+            .filter(|&r| !params.is_panel(&d.part.name) || params.tilt(r) <= params.panel_tolerance + 1e-9)
             .filter(|&r| {
                 let b = rotated_bbox(d, r);
                 b.height() <= params.width + 1e-6 && b.width() <= params.length + 1e-6

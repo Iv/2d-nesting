@@ -12,7 +12,7 @@
 //! Parts are drawn as right-hand ones; `left` copies are mirrored and named `<name>_L`.
 
 use crate::dxf_in::{read_part, ImportOptions};
-use crate::geom::{Demand, Part};
+use crate::geom::{Demand, Drawn, Part};
 use anyhow::{bail, Context, Result};
 use log::warn;
 use serde::Deserialize;
@@ -147,7 +147,12 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
                     }),
                 };
                 if qty.left > 0 {
-                    let left = Part { name: format!("{}{LEFT_SUFFIX}", part.name), source: part.source.clone(), shape: part.shape.mirrored() };
+                    let left = Part {
+                        name: format!("{}{LEFT_SUFFIX}", part.name),
+                        source: part.source.clone(),
+                        shape: part.shape.mirrored(),
+                        drawn: Drawn { mirrored: !part.drawn.mirrored, rotation_deg: -part.drawn.rotation_deg, ..part.drawn },
+                    };
                     if qty.right > 0 {
                         demands.push(Demand { part, qty: qty.right, filler: false });
                     }

@@ -1,7 +1,7 @@
 //! Reads a part from DXF: closed contours from LWPOLYLINE, POLYLINE, LINE/ARC chains, CIRCLE,
 //! ELLIPSE and SPLINE (also inside INSERT blocks). Curves are approximated by polylines.
 
-use crate::geom::{point_in_ring, signed_area, Part, Pt, Ring, Shape};
+use crate::geom::{point_in_ring, signed_area, Drawn, Part, Pt, Ring, Shape};
 use anyhow::{bail, Context, Result};
 use dxf::entities::{Entity, EntityType};
 use dxf::enums::Units;
@@ -68,10 +68,12 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
     for w in warnings {
         warn!("{}: {w}", path.display());
     }
+    let scale = unit_scale(drawing.header.default_drawing_units, &mut Vec::new())?;
     Ok(Part {
         name,
         source: path.to_path_buf(),
         shape,
+        drawn: Drawn { scale, ..Default::default() },
     })
 }
 

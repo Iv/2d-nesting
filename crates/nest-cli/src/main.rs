@@ -68,6 +68,11 @@ struct RunArgs {
     #[arg(long)]
     fillers: Vec<PathBuf>,
 
+    /// Write parts to the sheet DXF as traced contours with large name labels (for checking
+    /// layouts) instead of their source drawings inserted unchanged as blocks
+    #[arg(long)]
+    outlines: bool,
+
     /// Output folder (sheet_N.dxf, report.txt, steps/); default runs/<input name>_<date>_<time>
     #[arg(short, long)]
     out: Option<PathBuf>,
@@ -105,6 +110,10 @@ struct RunArgs {
     /// fabric length (0 = no penalty)
     #[arg(long, default_value_t = 10.0)]
     tilt_penalty: f64,
+
+    /// Largest tilt of a panel off a base angle, degrees (within --rotation-tolerance)
+    #[arg(long, default_value_t = 3.0)]
+    panel_tolerance: f64,
 
     /// Straight direction of a panel: along its long axis (elongated panels are turned before
     /// nesting) or the drawing's X axis
@@ -207,6 +216,9 @@ fn run(cli: RunArgs) -> Result<bool> {
     if !(cli.strip_ratio >= 1.0) {
         bail!("--strip-ratio must be at least 1");
     }
+    if !(cli.panel_tolerance >= 0.0) {
+        bail!("--panel-tolerance must not be negative");
+    }
     if !(cli.tilt_penalty >= 0.0) {
         bail!("--tilt-penalty must not be negative");
     }
@@ -240,6 +252,7 @@ fn run(cli: RunArgs) -> Result<bool> {
         rotation_step: cli.rotation_step,
         panels: cli.panels,
         tilt_penalty: cli.tilt_penalty,
+        panel_tolerance: cli.panel_tolerance,
         align_panels: cli.panel_axis == PanelAxis::Long,
         min_strip: cli.min_strip,
         strip_ratio: cli.strip_ratio,
@@ -265,7 +278,14 @@ fn run(cli: RunArgs) -> Result<bool> {
     let command: Vec<String> = std::env::args().collect();
     std::fs::write(out_dir.join("command.txt"), command.join(" ") + "\n")?;
 
-    let out = nest_core::run_with_fillers(&cli.input, &cli.fillers, &out_dir, &import, &params)?;
+    let out = nest_core::run_with_fillers(
+        &cli.input,
+        &cli.fillers,
+        &out_dir,
+        &import,
+        &params,
+        &nest_core::dxf_out::OutputOptions { outlines: cli.outlines },
+    )?;
     println!("{}", out.report);
     for f in &out.sheet_files {
         println!("Wrote {}", f.display());

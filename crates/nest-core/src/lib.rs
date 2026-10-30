@@ -35,7 +35,7 @@ impl JobOutput {
 
 /// Reads a folder of parts, nests, validates and writes `sheet_N.dxf` and `report.txt` to `out_dir`.
 pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params: &NestParams) -> Result<JobOutput> {
-    run_with_fillers(input, &[], out_dir, import, params)
+    run_with_fillers(input, &[], out_dir, import, params, &dxf_out::OutputOptions::default())
 }
 
 /// Like [`run`], with filler parts from further folders (small parts of other jobs, quantity = how
@@ -46,6 +46,7 @@ pub fn run_with_fillers(
     out_dir: &Path,
     import: &dxf_in::ImportOptions,
     params: &NestParams,
+    output: &dxf_out::OutputOptions,
 ) -> Result<JobOutput> {
     let mut demands = manifest::load_job(input, import)?;
     for dir in fillers {
@@ -95,7 +96,7 @@ pub fn run_with_fillers(
     let mut sheet_files = Vec::new();
     for (i, sheet) in outcome.result.sheets.iter().enumerate() {
         let path = out_dir.join(format!("sheet_{}.dxf", i + 1));
-        dxf_out::write_sheet(&path, &demands, sheet)?;
+        dxf_out::write_sheet(&path, &demands, sheet, output)?;
         dxf_out::write_svg(&path.with_extension("svg"), &demands, sheet)?;
         sheet_files.push(path);
     }

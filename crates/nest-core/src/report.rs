@@ -19,6 +19,9 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         String::new()
     };
     let _ = writeln!(s, "Allowed angles:      {}{tol}", angles.join(", "));
+    if params.rotation_tolerance > params.panel_tolerance {
+        let _ = writeln!(s, "Panel tilt limit:    {}°", params.panel_tolerance);
+    }
     if params.rotation_tolerance > 0.0 && params.tilt_penalty > 0.0 {
         let _ = writeln!(
             s,

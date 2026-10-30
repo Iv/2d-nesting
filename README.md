@@ -45,7 +45,7 @@ Output in `runs/<input>_<date>_<time>/` (or `--out`):
 
 | file | content |
 |---|---|
-| `sheet_N.dxf` | one DXF per sheet: layer `SHEET` (sheet rectangle), `PARTS` (part geometry after rotation and shift, inner geometry kept), `LABELS` (part name in the part) |
+| `sheet_N.dxf` | one DXF per sheet: layer `SHEET` (sheet rectangle) and every part as an `INSERT` of a block holding its source drawing unchanged (own layers, labels, marks; left copies are the same block mirrored). With `--outlines`: traced contours on layer `PARTS` and a large part name on `LABELS` instead |
 | `sheet_N.svg` | preview of the sheet |
 | `index.html` | all previews on one page |
 | `report.txt` | the report that is also printed to the console |
@@ -109,10 +109,12 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 | `--rotation-step` | 1 | step within the tolerance, degrees |
 | `--panels` | top,bot | parts whose name contains one of these are panels |
 | `--tilt-penalty` | 10 | a panel d° off a base angle costs this · d² mm of length; 0 = off |
+| `--panel-tolerance` | 3 | largest tilt of a panel off a base angle, degrees (ribs use the whole `--rotation-tolerance`) |
 | `--panel-axis` | long | panel grain: `long` (along the long axis) or `drawn` (drawing X axis) |
 | `--min-strip` | 150 | a free strip on top at least this wide, mm, is reusable; 0 = off |
 | `--strip-ratio` | 2 | fabric saved at the end is worth this many times the same area of strip |
 | `--fillers` | – | folder of filler parts for free space; may be repeated |
+| `--outlines` | – | sheet DXF with traced contours and large name labels instead of the source drawings as blocks (for checking layouts) |
 | `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
 | `-t, --time-limit` | 60 | search time per sheet, s |
 | `-i, --iterations` | – | iteration budget per sheet instead of time (reproducible) |
@@ -171,8 +173,10 @@ direction across which the panel is narrowest) lies along X. `-v` prints each tu
 `--panel-axis drawn` the drawing's X axis is taken as the grain instead.
 `cargo run --release --example axis -p nest-core -- <dir>` shows the long axis of every part as drawn.
 
-A panel placed d degrees off its base angle costs `--tilt-penalty` · d² mm (default 10:
-2° = 40 mm, 5° = 250 mm, 10° = 1 m). In sparrow (patched, `vendor/sparrow`):
+Panels are tilted by at most `--panel-tolerance` (default 3°; with `--rotation-step 2` that is
+0 and ±2°). Without the limit the search spends its time on denser layouts with steeper panels that
+then lose to the penalty, and a longer time limit gains nothing. Within the limit a panel placed
+d degrees off its base angle costs `--tilt-penalty` · d² mm (default 10: 2° = 40 mm, 5° = 250 mm). In sparrow (patched, `vendor/sparrow`):
 
 - among collision-free positions for a panel, the least tilted wins; half of the samples are taken
   at straight angles;
