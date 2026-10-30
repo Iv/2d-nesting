@@ -59,6 +59,10 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         if strip > 0.0 {
             let _ = writeln!(s, "  Free strip on top:  {strip:.0} mm (reusable, not counted as used)");
         }
+        let pocket = params.right_pocket(demands, &sheet.placements, sheet.used_length);
+        if pocket > 0.0 {
+            let _ = writeln!(s, "  Free at right end:  {:.3} m² (reusable, not counted as used)", pocket / 1e6);
+        }
         let _ = writeln!(s, "  Utilisation:        {:.2}% of the sheet, {:.2}% of the used length", pct(sheet_area), pct(used_area));
         let tilts: Vec<f64> = sheet
             .placements
@@ -83,7 +87,7 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         let _ = writeln!(s, "  Sheets:             {}", r.sheets.len());
         let _ = writeln!(s, "  Fabric used:        {:.3} m (sum of the used lengths, each sheet cut straight)", used / 1000.0);
         let consumed: f64 = r.sheets.iter().map(|sh| params.consumed(demands, &sh.placements, sh.used_length)).sum();
-        let _ = writeln!(s, "  Fabric consumed:    {:.3} m (less free strips on top of at least {} mm, valued at 1/{})",
+        let _ = writeln!(s, "  Fabric consumed:    {:.3} m (less free strips on top and space open to the right end, at least {} mm, valued at 1/{})",
             consumed / 1000.0,
             params.min_strip,
             params.strip_ratio

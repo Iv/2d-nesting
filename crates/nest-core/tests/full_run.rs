@@ -330,6 +330,29 @@ fn fillers_go_into_free_space_only() {
 }
 
 #[test]
+fn free_space_at_the_right_end_counts_less_than_a_hole() {
+    use nest_core::geom::{Demand, Part, Placement, Pt, Shape, Transform};
+    let rect = |w: f64, h: f64| Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(w, 0.0), Pt::new(w, h), Pt::new(0.0, h)], vec![]);
+    let part = |name: &str, shape: Shape| Demand { part: Part { name: name.into(), source: "x.dxf".into(), shape, ..Default::default() }, qty: 1, filler: false };
+    let demands = vec![part("long", rect(1000.0, 700.0)), part("short", rect(500.0, 700.0))];
+    let at = |i: usize, x: f64, y: f64| Placement { part: i, transform: Transform { rotation_deg: 0.0, translation: Pt::new(x, y) } };
+    let p = NestParams { width: 1560.0, min_strip: 150.0, strip_ratio: 2.0, ..Default::default() };
+    // Short part flush left: 500 x 700 mm free at the right end, 160 mm strip on top.
+    let flush = vec![at(0, 0.0, 0.0), at(1, 0.0, 700.0)];
+    // Short part flush right: the same 500 x 700 mm is a hole at the left.
+    let hole = vec![at(0, 0.0, 0.0), at(1, 500.0, 700.0)];
+    let pocket = p.right_pocket(&demands, &flush, 1000.0);
+    assert!((pocket - 500.0 * 700.0).abs() < 1.0, "{pocket}");
+    assert_eq!(p.right_pocket(&demands, &hole, 1000.0), 0.0);
+    let saved = |pl: &[Placement]| 1000.0 - p.consumed(&demands, pl, 1000.0);
+    assert!((saved(&flush) - (160.0 * 1000.0 + 500.0 * 700.0) / 1560.0 / 2.0).abs() < 0.01);
+    assert!((saved(&hole) - 160.0 * 1000.0 / 1560.0 / 2.0).abs() < 1e-9);
+    // A notch shallower than 150 mm does not count.
+    let shallow = vec![at(0, 0.0, 0.0), at(1, 0.0, 700.0), at(1, 400.0, 700.0)];
+    assert_eq!(p.right_pocket(&demands, &shallow, 1000.0), 0.0);
+}
+
+#[test]
 fn free_strip_on_top_is_not_counted() {
     use nest_core::geom::{Demand, Part, Placement, Pt, Shape, Transform};
     let shape = Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(1000.0, 0.0), Pt::new(1000.0, 1000.0), Pt::new(0.0, 1000.0)], vec![]);
@@ -342,8 +365,9 @@ fn free_strip_on_top_is_not_counted() {
     // Worth half as much as fabric saved at the end: only 280 mm of the strip count as saved.
     let half = NestParams { strip_ratio: 2.0, ..p.clone() };
     assert!((half.consumed(&demands, &at(0.0), 1000.0) - 1000.0 * (1560.0 - 280.0) / 1560.0).abs() < 1e-9);
-    // 100 mm is too narrow to reuse.
+    // 100 mm is too narrow to reuse; the 460 mm below the part is open to the right end and counts.
     assert_eq!(p.top_strip(&demands, &at(460.0)), 0.0);
-    assert_eq!(p.consumed(&demands, &at(460.0), 1000.0), 1000.0);
+    assert!((p.consumed(&demands, &at(460.0), 1000.0) - 1000.0 * (1560.0 - 460.0) / 1560.0).abs() < 1e-9);
+    assert!((p.consumed(&demands, &at(500.0), 1000.0) - 1000.0 * (1560.0 - 500.0) / 1560.0).abs() < 1e-9);
     assert_eq!(NestParams { min_strip: 0.0, ..p }.top_strip(&demands, &at(0.0)), 0.0);
 }

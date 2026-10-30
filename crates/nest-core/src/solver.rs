@@ -177,7 +177,56 @@ impl NestParams {
     /// Fabric a sheet consumes, as length of the full width: the used length, less the reusable
     /// band along the top, valued at 1/`strip_ratio` of fabric saved at the end of the sheet.
     pub fn consumed(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> f64 {
-        used_length * (1.0 - self.top_strip(demands, placements) / self.width / self.strip_ratio.max(1.0))
+        let free = self.top_strip(demands, placements) * used_length + self.right_pocket(demands, placements, used_length);
+        used_length - free / self.width / self.strip_ratio.max(1.0)
+    }
+
+    /// Free area (mm²) open to the right end of a sheet, below the top strip: wherever bands across
+    /// the sheet end at least `min_strip` short of the used length, over a stretch at least
+    /// `min_strip` tall. A laser cut can follow the parts there, and the fabric takes parts of other
+    /// jobs; a hole between parts cannot. Like the top strip it is worth 1/`strip_ratio` of length.
+    pub fn right_pocket(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> f64 {
+        /// Height of the bands the sheet is scanned in, mm.
+        const BAND: f64 = 5.0;
+        if self.min_strip <= 0.0 || placements.is_empty() {
+            return 0.0;
+        }
+        let top = self.width - self.top_strip(demands, placements);
+        let n = (top / BAND).ceil() as usize;
+        // Rightmost part boundary in each band.
+        let mut right = vec![0.0f64; n];
+        for p in placements {
+            let ring = demands[p.part].part.shape.transformed(&p.transform).outer;
+            for i in 0..ring.len() {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                let (lo, hi) = (a.y.min(b.y).max(0.0), a.y.max(b.y).min(top));
+                if lo > hi {
+                    continue;
+                }
+                let x_at = |y: f64| if (b.y - a.y).abs() < 1e-12 { a.x.max(b.x) } else { a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y) };
+                // Bands the edge passes through; touching a band's boundary does not count.
+                let end = ((hi / BAND).ceil() as usize).min(n);
+                for (k, r) in right.iter_mut().enumerate().take(end).skip((lo / BAND) as usize) {
+                    let (y0, y1) = ((k as f64 * BAND).max(lo), ((k + 1) as f64 * BAND).min(hi));
+                    *r = r.max(x_at(y0)).max(x_at(y1));
+                }
+            }
+        }
+        let (mut area, mut run_h, mut run_a) = (0.0, 0.0, 0.0);
+        for k in 0..=n {
+            let h = (top - k as f64 * BAND).min(BAND);
+            let gap = if k < n { used_length - right[k] } else { 0.0 };
+            if gap >= self.min_strip {
+                run_h += h;
+                run_a += gap * h;
+            } else {
+                if run_h >= self.min_strip - 1e-6 {
+                    area += run_a;
+                }
+                (run_h, run_a) = (0.0, 0.0);
+            }
+        }
+        area
     }
 
     /// Penalty of a part placed at `rotation_deg`, mm of length (0 for non-panels).
@@ -635,7 +684,8 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
 
 impl Prepared<'_> {
     /// One sparrow strip run over `counts[i]` copies of each part; returns placements in sheet coordinates.
-    /// Of the layouts sparrow found, one no longer than `max_len` is preferred (least length + tilt).
+    /// Of the layouts sparrow found, one no longer than `max_len` is preferred (least fabric
+    /// consumed + tilt penalty).
     fn strip(&self, counts: &[usize], params: &NestParams, max_len: f64, budget: Budget, seed: u64) -> Result<Vec<Placement>> {
         let g = params.gap;
         let items: Vec<ExtItem> = counts
@@ -670,7 +720,9 @@ impl Prepared<'_> {
         for sol in &solutions {
             let pl = self.placements(sol, g)?;
             let len = pl.iter().map(|p| self.demands[p.part].part.shape.transformed(&p.transform).bbox().max.x).fold(0.0, f64::max);
-            let cost = len + pl.iter().map(|p| params.tilt_cost(&self.demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+            // Fabric consumed (free space open to the top or the right end counts less) + tilt penalty.
+            let cost = params.consumed(self.demands, &pl, len)
+                + pl.iter().map(|p| params.tilt_cost(&self.demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
             // A layout that fits the sheet beats one that does not, whatever the penalty.
             let fits = len <= max_len + 1e-6;
             if best.as_ref().is_none_or(|b| (fits, -cost) > (b.0, -b.1)) {

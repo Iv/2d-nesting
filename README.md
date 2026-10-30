@@ -111,8 +111,8 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 | `--tilt-penalty` | 10 | a panel d° off a base angle costs this · d² mm of length; 0 = off |
 | `--panel-tolerance` | 3 | largest tilt of a panel off a base angle, degrees (ribs use the whole `--rotation-tolerance`) |
 | `--panel-axis` | long | panel grain: `long` (along the long axis) or `drawn` (drawing X axis) |
-| `--min-strip` | 150 | a free strip on top at least this wide, mm, is reusable; 0 = off |
-| `--strip-ratio` | 2 | fabric saved at the end is worth this many times the same area of strip |
+| `--min-strip` | 150 | a free strip on top, or free space open to the right end, at least this wide, mm, is reusable; 0 = off |
+| `--strip-ratio` | 2 | fabric saved at the end is worth this many times the same area of free strip or space at the right end |
 | `--fillers` | – | folder of filler parts for free space; may be repeated |
 | `--outlines` | – | sheet DXF with traced contours and large name labels instead of the source drawings as blocks (for checking layouts) |
 | `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
@@ -195,17 +195,23 @@ Each solver run keeps every feasible layout it found, and the one with the least
 penalty is used (a layout that fits the sheet length always wins over one that does not). The report
 shows per sheet how many panels are tilted and the largest tilt.
 
-### Free strip on top
+### Free strip on top and free space at the right end
 
 A free band along the top of a sheet, at least `--min-strip` wide (150 mm), takes other parts later,
-so it is not counted as waste. It is worth less than fabric saved at the end of the sheet, though:
-`--strip-ratio` k (default 2) says that a metre of length saved is worth k metres of the same width in
-the strip. A sheet then consumes `used length · (1 − strip / (k · width))`.
+so it is not counted as waste. So is free space open to the right end of the layout: wherever the
+parts end at least `--min-strip` short of the used length, over a stretch at least `--min-strip`
+tall (a bottom band or a pocket left by a short part; the laser cut follows the parts there). A hole
+between parts is waste. Free fabric is worth less than fabric saved at the end of the sheet, though:
+`--strip-ratio` k (default 2) says that a metre of length saved is worth k metres of the same width
+of free fabric. A sheet then consumes `used length − (strip · used length + space at the right end) / (k · width)`.
+Among the layouts the solver finds, the one consuming least (plus the tilt penalty) is used, so of two
+equally long layouts the one with its free space at the right end, not in holes, wins.
 
 When all sheets are made, every sheet with spare length is nested again into narrower strips
 (leaving 150 mm, the most the parts allow, and halfway between), and the variant consuming least
 (tilt penalty included) is kept. The report shows the strip per sheet and the total
-"Fabric consumed"; `sweep_summary.py` ranks runs by it.
+"Fabric consumed"; `sweep_summary.py` ranks runs by it. The report also shows the free area at the
+right end per sheet.
 
 ### Fillers
 

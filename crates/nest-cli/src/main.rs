@@ -120,13 +120,14 @@ struct RunArgs {
     #[arg(long, value_enum, default_value_t = PanelAxis::Long)]
     panel_axis: PanelAxis,
 
-    /// A free strip along the top of a sheet at least this wide (mm) is reusable and not counted
-    /// as used fabric; sheets with spare length are re-nested to leave one (0 = off)
+    /// A free strip along the top of a sheet, or free space open to the right end, at least this
+    /// wide (mm) is reusable and not counted as used fabric; sheets with spare length are re-nested
+    /// to leave a strip (0 = off)
     #[arg(long, default_value_t = 150.0)]
     min_strip: f64,
 
     /// Fabric saved at the end of a sheet is worth this many times the same area left as a strip
-    /// on top (1 = equally valuable)
+    /// on top or free space at the right end (1 = equally valuable)
     #[arg(long, default_value_t = 2.0)]
     strip_ratio: f64,
 
