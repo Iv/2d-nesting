@@ -159,6 +159,10 @@ struct RunArgs {
     #[arg(long)]
     labels: bool,
 
+    /// Inner geometry may stick out of the outer contour by this much (marks on the outline), mm
+    #[arg(long, default_value_t = 2.0)]
+    edge_tolerance: f64,
+
     /// Treat any open line as an error, even inside a part
     #[arg(long)]
     strict_open: bool,
@@ -246,6 +250,7 @@ fn run(cli: RunArgs) -> Result<bool> {
         ignore_layers: cli.ignore_layers,
         allow_open_inside: !cli.strict_open,
         close_gaps: cli.close_gaps,
+        edge_tolerance: cli.edge_tolerance,
         ..Default::default()
     };
     let params = NestParams {
