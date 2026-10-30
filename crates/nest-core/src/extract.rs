@@ -47,7 +47,8 @@ pub fn extract_blocks(src: &Path, patterns: &[String], out_dir: &Path) -> Result
     let selected: Vec<&Block> = blocks
         .values()
         .copied()
-        .filter(|b| !b.name.starts_with('*') && patterns.iter().any(|p| glob_match(p, &b.name)))
+        // `*Model_Space` and friends are layout blocks; names with `$` are anonymous CAD-generated blocks.
+        .filter(|b| !b.name.starts_with('*') && !b.name.contains('$') && patterns.iter().any(|p| glob_match(p, &b.name)))
         .collect();
     if selected.is_empty() {
         bail!("{}: no blocks match {:?}", src.display(), patterns);

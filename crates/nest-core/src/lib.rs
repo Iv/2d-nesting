@@ -36,7 +36,28 @@ impl JobOutput {
 /// Reads a folder of parts, nests, validates and writes `sheet_N.dxf` and `report.txt` to `out_dir`.
 pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params: &NestParams) -> Result<JobOutput> {
     let demands = manifest::load_job(input, import)?;
-    let outcome = solver::nest(&demands, params)?;
+    // Intermediate layouts go to `steps/` so a run can be looked through afterwards.
+    let steps_dir = out_dir.join("steps");
+    fs::create_dir_all(&steps_dir).with_context(|| format!("{}: cannot create directory", steps_dir.display()))?;
+    let mut n_step = 0;
+    let mut step_error = None;
+    let outcome = solver::nest_observed(&demands, params, &mut |st| {
+        n_step += 1;
+        let kind: String = st.kind.chars().map(|c| if c.is_alphanumeric() || c == '+' { c } else { '_' }).collect();
+        let name = format!("{n_step:03}_sheet{}_{kind}_{}.svg", st.sheet, if st.fits { "fits" } else { "long" });
+        let view = geom::Sheet {
+            width: params.width,
+            length: st.used_length.max(params.length),
+            used_length: st.used_length,
+            placements: st.placements.clone(),
+        };
+        if let Err(e) = dxf_out::write_svg_with_limit(&steps_dir.join(name), &demands, &view, Some(params.length)) {
+            step_error.get_or_insert(e);
+        }
+    })?;
+    if let Some(e) = step_error {
+        return Err(e);
+    }
     let validations: Vec<Validation> = outcome
         .result
         .sheets
@@ -49,11 +70,37 @@ pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params:
     for (i, sheet) in outcome.result.sheets.iter().enumerate() {
         let path = out_dir.join(format!("sheet_{}.dxf", i + 1));
         dxf_out::write_sheet(&path, &demands, sheet)?;
+        dxf_out::write_svg(&path.with_extension("svg"), &demands, sheet)?;
         sheet_files.push(path);
     }
+    write_overview(&out_dir.join("index.html"), &outcome, &validations)?;
     let report = report::render(&demands, params, &outcome, &validations);
     let report_path = out_dir.join("report.txt");
     fs::write(&report_path, &report).with_context(|| format!("{}: cannot write", report_path.display()))?;
 
     Ok(JobOutput { demands, outcome, validations, report, sheet_files })
+}
+
+/// A page showing all sheet previews one under another, to look through a whole job at once.
+fn write_overview(path: &Path, outcome: &NestOutcome, validations: &[Validation]) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut h = String::from(
+        "<!doctype html><meta charset='utf-8'><title>Nesting</title>\
+         <style>body{font-family:sans-serif;margin:16px;background:#f4f4f4}img{width:100%;background:#fff;border:1px solid #999}\
+         h2{font-size:15px;margin:18px 0 6px}</style>",
+    );
+    for (i, s) in outcome.result.sheets.iter().enumerate() {
+        let ok = validations.get(i).is_some_and(Validation::ok);
+        let _ = write!(
+            h,
+            "<h2>Sheet {} — {} parts, used {:.0} of {:.0} mm{}</h2><img src='sheet_{}.svg'>",
+            i + 1,
+            s.placements.len(),
+            s.used_length,
+            s.length,
+            if ok { "" } else { " — VALIDATION FAILED" },
+            i + 1
+        );
+    }
+    fs::write(path, h).with_context(|| format!("{}: cannot write", path.display()))
 }

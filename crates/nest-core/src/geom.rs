@@ -178,11 +178,13 @@ pub struct Placement {
     pub transform: Transform,
 }
 
-/// A piece of fabric. Width along Y, length along X, origin at the bottom-left corner.
+/// A fixed-size sheet of fabric. Width along Y, length along X, origin at the bottom-left corner.
 #[derive(Debug, Clone)]
 pub struct Sheet {
     pub width: f64,
     pub length: f64,
+    /// Distance from the sheet start to the far end of the last part, mm.
+    pub used_length: f64,
     pub placements: Vec<Placement>,
 }
 
@@ -193,7 +195,7 @@ pub struct Unplaced {
     pub reason: String,
 }
 
-/// Nesting result. Always one sheet for now, but the structure allows several.
+/// Nesting result: fixed-size sheets filled in order, and the parts that fit no sheet.
 #[derive(Debug, Clone)]
 pub struct NestResult {
     pub sheets: Vec<Sheet>,

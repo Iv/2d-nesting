@@ -111,3 +111,31 @@ fn rotation_tolerance_expands_angles() {
     let allowed = p.allowed_angles();
     assert!(job.outcome.result.sheets[0].placements.iter().all(|pl| allowed.contains(&pl.transform.rotation_deg)));
 }
+
+#[test]
+fn parts_are_spread_over_fixed_size_sheets() {
+    let input = job_dir();
+    let out = tempfile::tempdir().unwrap();
+    // A short sheet: the 23 parts need several sheets.
+    let p = NestParams { width: 700.0, length: 900.0, ..params(2.0, vec![0.0, 90.0, 180.0, 270.0], 5) };
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    let r = &job.outcome.result;
+    assert!(r.sheets.len() >= 3, "{} sheets", r.sheets.len());
+    assert!(r.unplaced.is_empty());
+    assert_eq!(r.sheets.iter().map(|s| s.placements.len()).sum::<usize>(), 23);
+    for (s, v) in r.sheets.iter().zip(&job.validations) {
+        assert!(v.ok(), "{v}");
+        assert_eq!((s.width, s.length), (700.0, 900.0));
+        assert!(s.used_length <= 900.0 + 1e-6);
+    }
+    // Every part copy is placed exactly as often as demanded.
+    let mut count = vec![0; job.demands.len()];
+    for s in &r.sheets {
+        for pl in &s.placements {
+            count[pl.part] += 1;
+        }
+    }
+    assert!(job.demands.iter().zip(&count).all(|(d, &c)| d.qty == c));
+    assert_eq!(job.sheet_files.len(), r.sheets.len());
+    assert!(out.path().join("index.html").is_file());
+}

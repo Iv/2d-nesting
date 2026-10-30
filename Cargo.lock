@@ -935,6 +935,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "env_logger",
+ "jiff",
  "log",
  "nest-core",
 ]
@@ -953,7 +954,6 @@ dependencies = [
  "serde",
  "sparrow",
  "tempfile",
- "thiserror",
  "toml",
 ]
 

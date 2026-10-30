@@ -10,7 +10,7 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
     let mut s = String::new();
     let _ = writeln!(s, "Nesting report");
     let _ = writeln!(s, "==============");
-    let _ = writeln!(s, "Fabric width:        {:.0} mm", params.width);
+    let _ = writeln!(s, "Sheet size:          {:.0} x {:.0} mm", params.width, params.length);
     let _ = writeln!(s, "Gap between parts:   {} mm", params.gap);
     let angles: Vec<String> = params.rotations.iter().map(|a| format!("{a}°")).collect();
     let tol = if params.rotation_tolerance > 0.0 {
@@ -28,33 +28,37 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
     let _ = writeln!(s);
 
     let part_area = |i: usize| demands[i].part.shape.area();
+    let mut total_area = 0.0;
     for (n, sheet) in r.sheets.iter().enumerate() {
         let placed_area: f64 = sheet.placements.iter().map(|p| part_area(p.part)).sum();
+        total_area += placed_area;
         let sheet_area = sheet.width * sheet.length;
-        let util = if sheet_area > 0.0 { placed_area / sheet_area * 100.0 } else { 0.0 };
-        let lower = placed_area / sheet.width;
+        let used_area = sheet.width * sheet.used_length;
+        let pct = |a: f64| if a > 0.0 { placed_area / a * 100.0 } else { 0.0 };
         let _ = writeln!(s, "Sheet {}", n + 1);
-        let _ = writeln!(s, "  Used length:        {:.1} mm", sheet.length);
-        let _ = writeln!(s, "  Fabric used:        {:.3} m", sheet.length / 1000.0);
-        let _ = writeln!(s, "  Parts area:         {:.4} m² (by outer contour)", placed_area / 1e6);
-        let _ = writeln!(s, "  Sheet area:         {:.4} m²", sheet_area / 1e6);
-        let _ = writeln!(s, "  Utilisation:        {util:.2}%");
-        let _ = writeln!(
-            s,
-            "  Length lower bound: {lower:.1} mm (area / width; layout is {:.1}% longer)",
-            if lower > 0.0 { (sheet.length / lower - 1.0) * 100.0 } else { 0.0 }
-        );
         let _ = writeln!(s, "  Parts on sheet:     {}", sheet.placements.len());
-        if sheet.length > params.max_length {
-            let _ = writeln!(
-                s,
-                "  WARNING: length {:.1} mm exceeds the maximum {:.0} mm",
-                sheet.length, params.max_length
-            );
-        }
+        let _ = writeln!(s, "  Parts area:         {:.4} m² (by outer contour)", placed_area / 1e6);
+        let _ = writeln!(s, "  Used length:        {:.1} of {:.0} mm", sheet.used_length, sheet.length);
+        let _ = writeln!(s, "  Utilisation:        {:.2}% of the sheet, {:.2}% of the used length", pct(sheet_area), pct(used_area));
         if let Some(v) = validations.get(n) {
             let _ = writeln!(s, "  {}", v.to_string().trim_end().replace('\n', "\n  "));
         }
+        let _ = writeln!(s);
+    }
+    if !r.sheets.is_empty() {
+        // Fabric past a straight cut after the last part of a sheet is kept, not wasted.
+        let used: f64 = r.sheets.iter().map(|sh| sh.used_length).sum();
+        let _ = writeln!(s, "Total");
+        let _ = writeln!(s, "  Sheets:             {}", r.sheets.len());
+        let _ = writeln!(s, "  Fabric used:        {:.3} m (sum of the used lengths, each sheet cut straight)", used / 1000.0);
+        let _ = writeln!(s, "  Parts area:         {:.4} m²", total_area / 1e6);
+        let _ = writeln!(s, "  Utilisation:        {:.2}% of the used fabric", total_area / (used * params.width) * 100.0);
+        let _ = writeln!(
+            s,
+            "  Lower bound:        {:.3} m of fabric, {:.2} sheets (by area)",
+            total_area / params.width / 1000.0,
+            total_area / (params.width * params.length)
+        );
         let _ = writeln!(s);
     }
 

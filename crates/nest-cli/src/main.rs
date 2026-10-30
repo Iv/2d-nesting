@@ -47,17 +47,17 @@ struct RunArgs {
     /// Folder with part DXF files and an optional parts.toml / parts.csv manifest
     input: PathBuf,
 
-    /// Output folder (sheet_N.dxf, report.txt)
-    #[arg(short, long, default_value = "out")]
-    out: PathBuf,
+    /// Output folder (sheet_N.dxf, report.txt, steps/); default runs/<input name>_<date>_<time>
+    #[arg(short, long)]
+    out: Option<PathBuf>,
 
-    /// Fabric width, mm
+    /// Sheet width, mm (across the fabric)
     #[arg(long, default_value_t = 1560.0)]
     width: f64,
 
-    /// Maximum sheet length, mm (exceeding it gives a warning)
+    /// Sheet length, mm (along the fabric); parts go to as many sheets as needed
     #[arg(long, default_value_t = 5800.0)]
-    max_length: f64,
+    length: f64,
 
     /// Gap between parts, mm
     #[arg(short, long, default_value_t = 0.0)]
@@ -75,11 +75,11 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     rotation_step: f64,
 
-    /// Search time, seconds
+    /// Search time per sheet, seconds
     #[arg(short, long, default_value_t = 60.0, conflicts_with = "iterations")]
     time_limit: f64,
 
-    /// Fixed iteration budget instead of time: the same seed gives the same layout
+    /// Fixed iteration budget per sheet instead of time: the same seed gives the same layout
     #[arg(short, long)]
     iterations: Option<usize>,
 
@@ -172,7 +172,7 @@ fn run(cli: RunArgs) -> Result<bool> {
     };
     let params = NestParams {
         width: cli.width,
-        max_length: cli.max_length,
+        length: cli.length,
         gap: cli.gap,
         rotations: cli.rotations,
         rotation_tolerance: cli.rotation_tolerance,
@@ -186,22 +186,22 @@ fn run(cli: RunArgs) -> Result<bool> {
         cancel: Some(cancel),
     };
 
-    let out = nest_core::run(&cli.input, &cli.out, &import, &params)?;
+    let out_dir = cli.out.clone().unwrap_or_else(|| {
+        let name = cli.input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "job".into());
+        PathBuf::from("runs").join(format!("{name}_{}", jiff::Zoned::now().strftime("%Y-%m-%d_%H%M%S")))
+    });
+    std::fs::create_dir_all(&out_dir)?;
+    // Keep the exact command next to the results, to compare runs later.
+    let command: Vec<String> = std::env::args().collect();
+    std::fs::write(out_dir.join("command.txt"), command.join(" ") + "\n")?;
+
+    let out = nest_core::run(&cli.input, &out_dir, &import, &params)?;
     println!("{}", out.report);
     for f in &out.sheet_files {
         println!("Wrote {}", f.display());
     }
-    println!("Wrote {}", cli.out.join("report.txt").display());
-    for (i, s) in out.outcome.result.sheets.iter().enumerate() {
-        if s.length > params.max_length {
-            eprintln!(
-                "WARNING: sheet {} is {:.1} mm long, more than the maximum {:.0} mm",
-                i + 1,
-                s.length,
-                params.max_length
-            );
-        }
-    }
+    println!("Wrote {}", out_dir.join("report.txt").display());
+    println!("Overview: {}", out_dir.join("index.html").display());
     if !out.valid() {
         eprintln!("VALIDATION ERROR: the layout has violations, see the report");
     }
