@@ -10,7 +10,7 @@ fn fixtures_import_with_expected_areas() {
     let opts = ImportOptions::default();
     for (name, area) in write_fixtures(dir.path()) {
         let part = read_part(&dir.path().join(format!("{name}.dxf")), &opts).unwrap();
-        let got = part.shape.area();
+        let got = part.shape.net_area();
         // Хорды лежат внутри дуг, поэтому площадь кривых немного меньше точной.
         let rel = (got - area).abs() / area;
         assert!(rel < 0.005, "{name}: площадь {got:.1}, ожидалось {area:.1}");
@@ -63,13 +63,14 @@ fn open_contour_is_reported_with_file_and_layer() {
             on("GRAIN", line((50.0, 10.0), (50.0, 90.0))),
         ],
     );
-    let err = format!("{:#}", read_part(&dir.path().join("broken.dxf"), &ImportOptions::default()).unwrap_err());
+    let strict = ImportOptions { allow_open_inside: false, ..Default::default() };
+    let err = format!("{:#}", read_part(&dir.path().join("broken.dxf"), &strict).unwrap_err());
     assert!(err.contains("broken.dxf"), "{err}");
     assert!(err.contains("незамкнут"), "{err}");
     assert!(err.contains("CUT") && err.contains("GRAIN"), "{err}");
 
     // После исключения слоя GRAIN остаётся только незамкнутый CUT.
-    let opts = ImportOptions { ignore_layers: vec!["grain".into()], ..Default::default() };
+    let opts = ImportOptions { ignore_layers: vec!["grain".into()], allow_open_inside: false, ..Default::default() };
     let err = format!("{:#}", read_part(&dir.path().join("broken.dxf"), &opts).unwrap_err());
     assert!(!err.contains("GRAIN"), "{err}");
 }
@@ -101,4 +102,39 @@ fn second_part_in_file_is_an_error() {
     );
     let err = format!("{:#}", read_part(&dir.path().join("pair.dxf"), &ImportOptions::default()).unwrap_err());
     assert!(err.contains("не лежит внутри"), "{err}");
+}
+
+#[test]
+fn open_lines_inside_are_kept_and_nested_contours_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    save(
+        dir.path(),
+        "rib",
+        Units::Millimeters,
+        vec![
+            on("0", rect(0.0, 0.0, 300.0, 100.0)),
+            on("0", rect(20.0, 20.0, 100.0, 60.0)),
+            on("0", rect(40.0, 40.0, 20.0, 20.0)), // контур внутри выреза
+            on("0", line((150.0, 10.0), (150.0, 90.0))),
+        ],
+    );
+    let s = read_part(&dir.path().join("rib.dxf"), &ImportOptions::default()).unwrap().shape;
+    assert_eq!((s.holes.len(), s.lines.len()), (2, 1));
+    assert!((s.area() - 30_000.0).abs() < 1e-6);
+    assert!((s.net_area() - (30_000.0 - 6000.0 + 400.0)).abs() < 1e-6);
+
+    // Разорванный внешний контур не маскируется под «линию внутри».
+    save(
+        dir.path(),
+        "torn",
+        Units::Millimeters,
+        vec![
+            on("0", line((0.0, 0.0), (300.0, 0.0))),
+            on("0", line((300.0, 0.0), (300.0, 100.0))),
+            on("0", line((300.0, 100.0), (0.0, 100.0))),
+            on("0", rect(20.0, 20.0, 50.0, 50.0)),
+        ],
+    );
+    let err = format!("{:#}", read_part(&dir.path().join("torn.dxf"), &ImportOptions::default()).unwrap_err());
+    assert!(err.contains("выходят за"), "{err}");
 }

@@ -123,7 +123,13 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
                     demands.push(Demand { part, qty });
                 }
             }
-            Err(e) => errors.push(format!("{e:#}")),
+            Err(e) => {
+                // Деталь есть, просто не прочиталась: не считать её «отсутствующей» в манифесте.
+                if let (Some(q), Some(stem)) = (qtys.as_mut(), f.file_stem()) {
+                    q.remove(stem.to_string_lossy().as_ref());
+                }
+                errors.push(format!("{e:#}"));
+            }
         }
     }
     if let Some(q) = qtys

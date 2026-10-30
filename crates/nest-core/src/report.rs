@@ -31,7 +31,7 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         let _ = writeln!(s, "Отрез {}", n + 1);
         let _ = writeln!(s, "  Использованная длина: {:.1} мм", sheet.length);
         let _ = writeln!(s, "  Расход ткани:         {:.3} м", sheet.length / 1000.0);
-        let _ = writeln!(s, "  Площадь деталей:      {:.4} м²", placed_area / 1e6);
+        let _ = writeln!(s, "  Площадь деталей:      {:.4} м² (по внешнему контуру)", placed_area / 1e6);
         let _ = writeln!(s, "  Площадь отреза:       {:.4} м²", sheet_area / 1e6);
         let _ = writeln!(s, "  Использование ткани:  {util:.2}%");
         let _ = writeln!(
@@ -63,15 +63,16 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
     let _ = writeln!(s);
     let _ = writeln!(s, "Детали:");
     let w = demands.iter().map(|d| d.part.name.chars().count()).max().unwrap_or(4).max(6);
-    let _ = writeln!(s, "  {:<w$}  {:>5}  {:>12}  {:>6}", "деталь", "кол-во", "площадь, мм²", "отв.");
+    let _ = writeln!(s, "  {:<w$}  {:>6}  {:>12}  {:>12}  {:>6}", "деталь", "кол-во", "площадь, мм²", "нетто, мм²", "внутр.");
     for d in demands {
         let _ = writeln!(
             s,
-            "  {:<w$}  {:>5}  {:>12.1}  {:>6}",
+            "  {:<w$}  {:>6}  {:>12.1}  {:>12.1}  {:>6}",
             d.part.name,
             d.qty,
             d.part.shape.area(),
-            d.part.shape.holes.len()
+            d.part.shape.net_area(),
+            d.part.shape.holes.len() + d.part.shape.lines.len()
         );
     }
     s

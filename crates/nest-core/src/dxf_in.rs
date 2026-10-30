@@ -7,7 +7,7 @@ use dxf::entities::{Entity, EntityType};
 use dxf::enums::Units;
 use dxf::{Drawing, Point};
 use log::{debug, warn};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::f64::consts::{PI, TAU};
 use std::path::Path;
 
@@ -21,6 +21,13 @@ pub struct ImportOptions {
     pub layers: Option<Vec<String>>,
     /// Слои, которые пропускаются (без учёта регистра).
     pub ignore_layers: Vec<String>,
+    /// Разрешать незамкнутые линии внутри внешнего контура (они переносятся в результат вместе с деталью).
+    /// Если `false`, любая незамкнутая линия — ошибка.
+    pub allow_open_inside: bool,
+    /// Gap up to which open pieces are bridged when assembling the outer contour, mm.
+    pub close_gaps: f64,
+    /// Inner geometry may stick out of the outer contour by this much (marks on the outline), mm.
+    pub edge_tolerance: f64,
 }
 
 impl Default for ImportOptions {
@@ -30,6 +37,9 @@ impl Default for ImportOptions {
             join_tolerance: 0.05,
             layers: None,
             ignore_layers: Vec::new(),
+            allow_open_inside: true,
+            close_gaps: 1.0,
+            edge_tolerance: 2.0,
         }
     }
 }
@@ -83,25 +93,11 @@ fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
     })
 }
 
-/// Собирает деталь из чертежа; некритичные замечания добавляются в `warnings`.
+/// Builds a part from a drawing; non-fatal remarks go to `warnings`.
 pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mut Vec<String>) -> Result<Shape> {
-    let scale = unit_scale(drawing.header.default_drawing_units, warnings)?;
-    let mut collector = Collector {
-        drawing,
-        opts,
-        pieces: Vec::new(),
-        skipped: BTreeMap::new(),
-        warnings,
-    };
-    let root = Affine::scale(scale);
-    for e in drawing.entities() {
-        collector.entity(e, &root, None, 0)?;
-    }
-    if !collector.skipped.is_empty() {
-        debug!("пропущены объекты: {:?}", collector.skipped);
-    }
-    let (rings, open) = chain(collector.pieces, opts.join_tolerance);
-    if !open.is_empty() {
+    let pieces = collect_pieces(drawing, opts, warnings)?;
+    let (rings, open) = chain(pieces, opts.join_tolerance);
+    if !open.is_empty() && !opts.allow_open_inside {
         let mut by_layer: BTreeMap<String, usize> = BTreeMap::new();
         for (_, layer) in &open {
             *by_layer.entry(layer.clone()).or_default() += 1;
@@ -111,7 +107,7 @@ pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mu
             .map(|(l, n)| format!("слой \"{l}\": {n}"))
             .collect::<Vec<_>>()
             .join(", ");
-        // Разрыв между началом и концом цепочки подсказывает, хватит ли увеличить --join-tolerance.
+        // The distance between chain ends hints whether a larger --join-tolerance would help.
         let mut gaps: Vec<f64> = open.iter().map(|(c, _)| c[0].dist(*c.last().unwrap())).collect();
         gaps.sort_by(f64::total_cmp);
         let gaps = gaps.iter().take(3).map(|g| format!("{g:.3}")).collect::<Vec<_>>().join(", ");
@@ -121,40 +117,109 @@ pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mu
             open.len()
         );
     }
-    classify(rings, collector.warnings)
+    assemble(rings, open, opts, warnings)
 }
 
-/// Внешний контур = наибольший по площади, остальные должны лежать внутри него и становятся отверстиями.
-fn classify(rings: Vec<(Ring, String)>, warnings: &mut Vec<String>) -> Result<Shape> {
+fn collect_pieces(drawing: &Drawing, opts: &ImportOptions, warnings: &mut Vec<String>) -> Result<Vec<(Vec<Pt>, String)>> {
+    let scale = unit_scale(drawing.header.default_drawing_units, warnings)?;
+    let mut collector = Collector { drawing, opts, pieces: Vec::new(), skipped: BTreeMap::new(), warnings };
+    let root = Affine::scale(scale);
+    for e in drawing.entities() {
+        collector.entity(e, &root, None, 0)?;
+    }
+    if !collector.skipped.is_empty() {
+        debug!("пропущены объекты: {:?}", collector.skipped);
+    }
+    Ok(collector.pieces)
+}
+
+/// Closed and open contours of a drawing (for diagnostics).
+pub fn contours(drawing: &Drawing, opts: &ImportOptions) -> Result<(Vec<(Ring, String)>, Vec<(Vec<Pt>, String)>)> {
+    let mut warnings = Vec::new();
+    let pieces = collect_pieces(drawing, opts, &mut warnings)?;
+    Ok(chain(pieces, opts.join_tolerance))
+}
+
+/// Picks the outer contour and checks that everything else lies inside it.
+///
+/// The outer contour is the largest closed ring. If the open chains, joined with the coarser
+/// `close_gaps` tolerance, form a larger ring, that ring becomes the outer contour instead: real
+/// drawings often have an outline made of pieces that do not quite meet. Only the outer contour is
+/// bridged; inner geometry is kept exactly as drawn.
+fn assemble(
+    rings: Vec<(Ring, String)>,
+    open: Vec<(Vec<Pt>, String)>,
+    opts: &ImportOptions,
+    warnings: &mut Vec<String>,
+) -> Result<Shape> {
+    let usable = |r: &Ring| r.len() >= 3 && signed_area(r).abs() > 1e-6;
     let mut rings: Vec<(Ring, String)> = rings
         .into_iter()
         .filter(|(r, layer)| {
-            let ok = r.len() >= 3 && signed_area(r).abs() > 1e-6;
+            let ok = usable(r);
             if !ok {
                 warnings.push(format!("вырожденный контур на слое \"{layer}\" пропущен"));
             }
             ok
         })
         .collect();
-    if rings.is_empty() {
-        bail!("в чертеже нет замкнутых контуров");
-    }
     rings.sort_by(|a, b| signed_area(&b.0).abs().total_cmp(&signed_area(&a.0).abs()));
-    let (outer, _) = rings.remove(0);
+    let closed_best = rings.first().map_or(0.0, |(r, _)| signed_area(r).abs());
+
+    let bridged = if opts.close_gaps > opts.join_tolerance && !open.is_empty() {
+        let (b, _) = chain(open.clone(), opts.close_gaps);
+        b.into_iter().map(|(r, _)| r).filter(usable).max_by(|a, b| signed_area(a).abs().total_cmp(&signed_area(b).abs()))
+    } else {
+        None
+    };
+
+    let mut open = open;
+    let outer = match bridged {
+        Some(b) if signed_area(&b).abs() > closed_best => {
+            // Open chains that became part of the outer contour are no longer inner lines.
+            let on_outer: HashSet<(u64, u64)> = b.iter().map(|p| (p.x.to_bits(), p.y.to_bits())).collect();
+            open.retain(|(c, _)| !c.iter().all(|p| on_outer.contains(&(p.x.to_bits(), p.y.to_bits()))));
+            warnings.push(format!(
+                "внешний контур собран из незамкнутых кусков с разрывами до {} мм (--close-gaps)",
+                opts.close_gaps
+            ));
+            b
+        }
+        _ if rings.is_empty() => bail!(
+            "в чертеже нет замкнутых контуров; если контур разорван, увеличьте --close-gaps (сейчас {} мм)",
+            opts.close_gaps
+        ),
+        _ => rings.remove(0).0,
+    };
+
+    // Marks and notches may sit on the outline itself, so points close to it count as inside.
+    let inside = |p: Pt| point_in_ring(p, &outer) || dist_to_ring(p, &outer) <= opts.edge_tolerance;
     let mut holes: Vec<Ring> = Vec::new();
     for (ring, layer) in rings {
-        if !ring.iter().all(|&p| point_in_ring(p, &outer)) {
+        if !ring.iter().all(|&p| inside(p)) {
             bail!(
-                "контур на слое \"{layer}\" (площадь {:.1} мм²) не лежит внутри внешнего контура: в файле должна быть одна деталь",
-                signed_area(&ring).abs()
+                "контур на слое \"{layer}\" (площадь {:.1} мм²) не лежит внутри внешнего контура: в файле должна быть одна деталь \
+                 (если внешний контур разорван, увеличьте --close-gaps, сейчас {} мм)",
+                signed_area(&ring).abs(),
+                opts.close_gaps
             );
-        }
-        if holes.iter().any(|h| point_in_ring(ring[0], h)) {
-            bail!("контур на слое \"{layer}\" лежит внутри отверстия: вложенные отверстия не поддерживаются");
         }
         holes.push(ring);
     }
-    Ok(Shape::new(outer, holes))
+    let outside = open.iter().filter(|(c, _)| !c.iter().all(|&p| inside(p))).count();
+    if outside > 0 {
+        bail!(
+            "{outside} незамкнутых линий выходят за внешний контур: вероятно, он разорван сильнее, чем --close-gaps ({} мм)",
+            opts.close_gaps
+        );
+    }
+    let mut shape = Shape::new(outer, holes);
+    shape.lines = open.into_iter().map(|(c, _)| c).collect();
+    Ok(shape)
+}
+
+fn dist_to_ring(p: Pt, ring: &[Pt]) -> f64 {
+    (0..ring.len()).map(|i| dist_to_segment(p, ring[i], ring[(i + 1) % ring.len()])).fold(f64::INFINITY, f64::min)
 }
 
 /// Аффинное преобразование 2D: [a b c; d e f].

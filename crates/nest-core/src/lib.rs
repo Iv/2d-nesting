@@ -4,6 +4,7 @@
 
 pub mod dxf_in;
 pub mod dxf_out;
+pub mod extract;
 pub mod geom;
 pub mod manifest;
 pub mod report;

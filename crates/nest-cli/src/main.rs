@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use nest_core::dxf_in::ImportOptions;
 use nest_core::solver::{Budget, NestParams};
 use std::path::PathBuf;
@@ -8,10 +8,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Раскладка лекал на ткань: папка DXF (одна деталь = один файл) → DXF отреза и отчёт.
+/// Раскладка лекал на ткань (2D strip packing), вход и выход DXF.
 #[derive(Parser, Debug)]
 #[command(name = "nest", version)]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+
+    /// Подробный вывод (повторите для отладки солвера)
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Разложить детали: папка DXF (одна деталь = один файл) → DXF отреза и отчёт
+    Run(RunArgs),
+    /// Сохранить блоки сборочного DXF в отдельные файлы-детали
+    Extract(ExtractArgs),
+}
+
+#[derive(Args, Debug)]
+struct ExtractArgs {
+    /// Сборочный DXF, где каждая деталь в своём блоке
+    input: PathBuf,
+
+    /// Шаблоны имён блоков через запятую (* и ?), например "rib*"
+    #[arg(short, long, value_delimiter = ',', required = true)]
+    blocks: Vec<String>,
+
+    /// Папка для файлов деталей и parts.toml
+    #[arg(short, long)]
+    out: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct RunArgs {
     /// Папка с DXF-деталями и необязательным манифестом parts.toml / parts.csv
     input: PathBuf,
 
@@ -67,9 +99,13 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     ignore_layers: Vec<String>,
 
-    /// Подробный вывод (повторите для отладки солвера)
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Максимальный разрыв, который закрывается при сборке внешнего контура из кусков, мм
+    #[arg(long, default_value_t = 1.0)]
+    close_gaps: f64,
+
+    /// Считать ошибкой любую незамкнутую линию, даже внутри детали
+    #[arg(long)]
+    strict_open: bool,
 }
 
 fn main() -> ExitCode {
@@ -82,7 +118,11 @@ fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
         .format_timestamp(None)
         .init();
-    match run(cli) {
+    let result = match cli.cmd {
+        Cmd::Run(args) => run(args),
+        Cmd::Extract(args) => extract(args).map(|()| true),
+    };
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
         Err(e) => {
@@ -92,7 +132,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<bool> {
+fn extract(args: ExtractArgs) -> Result<()> {
+    let blocks = nest_core::extract::extract_blocks(&args.input, &args.blocks, &args.out)?;
+    for b in &blocks {
+        println!("{:<24} вставок в чертеже: {:>2}  → {}", b.name, b.inserts, b.path.display());
+    }
+    println!("Сохранено деталей: {}. Количества задайте в {}", blocks.len(), args.out.join("parts.toml").display());
+    Ok(())
+}
+
+fn run(cli: RunArgs) -> Result<bool> {
     if !(cli.time_limit > 0.0) {
         bail!("--time-limit должен быть больше нуля");
     }
@@ -109,6 +158,9 @@ fn run(cli: Cli) -> Result<bool> {
         join_tolerance: cli.join_tolerance,
         layers: cli.layers,
         ignore_layers: cli.ignore_layers,
+        allow_open_inside: !cli.strict_open,
+        close_gaps: cli.close_gaps,
+        ..Default::default()
     };
     let params = NestParams {
         width: cli.width,

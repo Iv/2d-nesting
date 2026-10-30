@@ -9,7 +9,7 @@ use jagua_rs::io::import::Importer;
 use jagua_rs::probs::spp::entities::SPSolution;
 use jagua_rs::probs::spp::io::ext_repr::{ExtItem, ExtSPInstance};
 use jagua_rs::Instant;
-use log::info;
+use log::{info, warn};
 use rand::rngs::Xoshiro256PlusPlus;
 use rand::SeedableRng;
 use sparrow::config::{ShrinkDecayStrategy, DEFAULT_SPARROW_CONFIG};
@@ -106,7 +106,7 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
             continue;
         }
         let o = offsets[idx];
-        let pts = d.part.shape.outer.iter().map(|p| ((p.x - o.x) as f32, (p.y - o.y) as f32)).collect();
+        let pts = solver_ring(&d.part.name, &d.part.shape.outer, o);
         items.push(ExtItem {
             base: BaseItem {
                 id: idx as u64,
@@ -139,7 +139,17 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
         strip_height: (params.width + 2.0 * g) as f32,
     };
 
-    let solution = run_sparrow(&ext_instance, params, seed)?;
+    let names: Vec<&str> = demands.iter().map(|d| d.part.name.as_str()).collect();
+    // jagua-rs / sparrow panic on some degenerate geometry; turn that into an error instead of aborting.
+    let solution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_sparrow(&ext_instance, &names, params, seed)))
+        .map_err(|p| {
+            let msg = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            anyhow::anyhow!("внутренняя ошибка солвера: {msg}")
+        })??;
 
     let mut placements = Vec::new();
     for pi in solution.layout_snapshot().placed_items().values() {
@@ -184,6 +194,46 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
     })
 }
 
+/// Outer contour in f32 relative to `origin`, in a form jagua-rs accepts.
+///
+/// Rounding to f32 can merge nearly coincident points and self-touching outlines repeat a vertex;
+/// such points are dropped. A self-intersecting outline is replaced by a 0.1 mm buffer around it,
+/// simplified by 0.05 mm: valid and never smaller than the original. The independent validation
+/// still checks the exact geometry.
+fn solver_ring(name: &str, ring: &[Pt], origin: Pt) -> Vec<(f32, f32)> {
+    use geo::{Area, Buffer, Simplify, Validation};
+    // Drops points closer than 1 µm to an already kept one (f32 noise, repeated vertices).
+    let clean = |pts: &mut dyn Iterator<Item = (f64, f64)>| {
+        let mut seen = std::collections::HashSet::new();
+        pts.map(|(x, y)| (x as f32, y as f32))
+            .filter(|q| seen.insert(((q.0 * 1000.0).round() as i64, (q.1 * 1000.0).round() as i64)))
+            .collect::<Vec<_>>()
+    };
+    let out = clean(&mut ring.iter().map(|p| (p.x - origin.x, p.y - origin.y)));
+    let as_poly = |pts: &[(f32, f32)]| {
+        geo::Polygon::new(pts.iter().map(|&(x, y)| (f64::from(x), f64::from(y))).collect::<Vec<_>>().into(), vec![])
+    };
+    let poly = as_poly(&out);
+    if poly.is_valid() {
+        return out;
+    }
+    let grown = poly.buffer(0.1);
+    let Some(best) = grown.0.iter().max_by(|a, b| a.unsigned_area().total_cmp(&b.unsigned_area())) else {
+        return out;
+    };
+    let simple = geo::Polygon::new(best.exterior().clone(), vec![]).simplify(0.05);
+    let mut pts = simple.exterior().0.clone();
+    pts.pop();
+    let fixed = clean(&mut pts.iter().map(|c| (c.x, c.y)));
+    if as_poly(&fixed).is_valid() {
+        warn!("{name}: внешний контур самопересекается, для раскладки взят его контур с запасом 0.1 мм");
+        fixed
+    } else {
+        warn!("{name}: внешний контур самопересекается и не исправляется автоматически");
+        out
+    }
+}
+
 fn rotated_height(d: &Demand, rot: f64) -> f64 {
     let t = Transform { rotation_deg: rot, translation: Pt::new(0.0, 0.0) };
     BBox::of(d.part.shape.outer.iter().map(|&p| t.apply(p))).height()
@@ -204,14 +254,24 @@ fn snap_angle(rot: f64, allowed: &[f64]) -> f64 {
         .unwrap_or(rot)
 }
 
-fn run_sparrow(ext: &ExtSPInstance, params: &NestParams, seed: u64) -> Result<SPSolution> {
+fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, seed: u64) -> Result<SPSolution> {
     let mut config = DEFAULT_SPARROW_CONFIG;
     config.expl_cfg.separator_config.n_workers = params.workers.max(1);
     config.cmpr_cfg.separator_config.n_workers = params.workers.max(1);
     let cancel = params.cancel.clone().unwrap_or_default();
 
     let importer = Importer::new(config.cde_config, config.poly_simpl_tolerance, config.narrow_concavity_cutoff_ratio);
-    let instance = jagua_rs::probs::spp::io::import_instance(&importer, ext).context("jagua-rs отклонил задание")?;
+    let instance = match jagua_rs::probs::spp::io::import_instance(&importer, ext) {
+        Ok(i) => i,
+        Err(e) => {
+            // Re-import item by item to name the offending part.
+            let bad = ext.items.iter().enumerate().find_map(|(i, it)| importer.import_item(&it.base, i).err().map(|e| (it.base.id, e)));
+            return Err(match bad {
+                Some((id, e)) => anyhow::anyhow!("jagua-rs отклонил деталь {}: {e:#}", names[id as usize]),
+                None => e.context("jagua-rs отклонил задание"),
+            });
+        }
+    };
     let rng = Xoshiro256PlusPlus::seed_from_u64(seed);
     let mut listener = ProgressListener;
 

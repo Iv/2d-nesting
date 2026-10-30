@@ -1,0 +1,132 @@
+//! Разбор сборочного DXF (все детали изделия, каждая в своём блоке) на файлы «одна деталь = один DXF».
+
+use anyhow::{bail, Context, Result};
+use dxf::entities::EntityType;
+use dxf::tables::Layer;
+use dxf::{Block, Drawing};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Сопоставление с шаблоном: `*` — любая строка, `?` — один символ, без учёта регистра.
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    fn rec(p: &[char], n: &[char]) -> bool {
+        match (p.first(), n.first()) {
+            (None, None) => true,
+            (Some('*'), _) => rec(&p[1..], n) || (!n.is_empty() && rec(p, &n[1..])),
+            (Some('?'), Some(_)) => rec(&p[1..], &n[1..]),
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => rec(&p[1..], &n[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    rec(&p, &n)
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtractedBlock {
+    pub name: String,
+    pub path: PathBuf,
+    /// Сколько раз блок вставлен в model space исходного чертежа.
+    pub inserts: usize,
+}
+
+/// Сохраняет каждый блок, чьё имя подходит под один из шаблонов, в `out_dir/<имя>.dxf`
+/// и пишет `parts.toml` с количеством 1 (число вставок в чертеже — в комментарии).
+pub fn extract_blocks(src: &Path, patterns: &[String], out_dir: &Path) -> Result<Vec<ExtractedBlock>> {
+    let d = Drawing::load_file(src).with_context(|| format!("{}: не удалось прочитать DXF", src.display()))?;
+    let mut inserts: BTreeMap<String, usize> = BTreeMap::new();
+    for e in d.entities() {
+        if let EntityType::Insert(i) = &e.specific {
+            *inserts.entry(i.name.clone()).or_default() += 1;
+        }
+    }
+    let blocks: BTreeMap<&str, &Block> = d.blocks().map(|b| (b.name.as_str(), b)).collect();
+    let selected: Vec<&Block> = blocks
+        .values()
+        .copied()
+        .filter(|b| !b.name.starts_with('*') && patterns.iter().any(|p| glob_match(p, &b.name)))
+        .collect();
+    if selected.is_empty() {
+        bail!("{}: нет блоков, подходящих под {:?}", src.display(), patterns);
+    }
+    fs::create_dir_all(out_dir).with_context(|| format!("{}: не удалось создать папку", out_dir.display()))?;
+
+    let mut out = Vec::new();
+    for b in selected {
+        let mut nd = Drawing::new();
+        nd.header.version = d.header.version;
+        nd.header.default_drawing_units = d.header.default_drawing_units;
+
+        // Вложенные блоки копируются вместе с деталью.
+        let mut needed = BTreeSet::new();
+        collect_nested(b, &blocks, &mut needed);
+        for name in &needed {
+            let mut nb = (*blocks[name.as_str()]).clone();
+            for e in &mut nb.entities {
+                e.common.handle = dxf::Handle::empty();
+            }
+            nd.add_block(nb);
+        }
+
+        let mut layers: BTreeSet<String> = BTreeSet::new();
+        for e in &b.entities {
+            layers.insert(e.common.layer.clone());
+            nd.add_entity(e.clone());
+        }
+        for l in layers.iter().filter(|l| l.as_str() != "0") {
+            let color = d.layers().find(|x| &x.name == l).map(|x| x.color.clone()).unwrap_or_default();
+            nd.add_layer(Layer { name: l.clone(), color, ..Default::default() });
+        }
+
+        let path = out_dir.join(format!("{}.dxf", sanitize(&b.name)));
+        nd.save_file(&path).with_context(|| format!("{}: не удалось записать", path.display()))?;
+        out.push(ExtractedBlock { name: b.name.clone(), path, inserts: inserts.get(&b.name).copied().unwrap_or(0) });
+    }
+
+    let mut manifest = String::from("# Количество каждой детали. Сгенерировано `nest extract`, проверьте и исправьте.\n[parts]\n");
+    for x in &out {
+        let stem = x.path.file_stem().unwrap().to_string_lossy();
+        let _ = writeln!(manifest, "\"{stem}\" = 1  # вставок в чертеже: {}", x.inserts);
+    }
+    let mpath = out_dir.join("parts.toml");
+    if mpath.exists() {
+        log::warn!("{} уже есть, не перезаписываю", mpath.display());
+    } else {
+        fs::write(&mpath, manifest).with_context(|| format!("{}: не удалось записать", mpath.display()))?;
+    }
+    Ok(out)
+}
+
+fn collect_nested(b: &Block, blocks: &BTreeMap<&str, &Block>, needed: &mut BTreeSet<String>) {
+    for e in &b.entities {
+        if let EntityType::Insert(i) = &e.specific
+            && let Some(nb) = blocks.get(i.name.as_str())
+            && needed.insert(i.name.clone())
+        {
+            collect_nested(nb, blocks, needed);
+        }
+    }
+}
+
+/// Имя блока → имя файла.
+fn sanitize(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() || "-_. ".contains(c) { c } else { '_' }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn glob() {
+        assert!(glob_match("rib*", "rib12"));
+        assert!(glob_match("RIB*", "rib1"));
+        assert!(!glob_match("rib*", "np1"));
+        assert!(glob_match("n?", "n5"));
+        assert!(!glob_match("n?", "np5"));
+        assert!(glob_match("*", ""));
+    }
+}

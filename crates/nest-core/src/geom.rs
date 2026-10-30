@@ -82,11 +82,15 @@ impl BBox {
     }
 }
 
-/// Многоугольник с отверстиями: внешний контур против часовой стрелки, отверстия по часовой.
-#[derive(Debug, Clone, PartialEq)]
+/// Деталь: внешний контур (по нему идёт раскладка) и всё, что внутри него.
+/// Внешний контур против часовой стрелки, внутренние замкнутые по часовой.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Shape {
     pub outer: Ring,
+    /// Замкнутые контуры внутри детали любой вложенности (отверстия, вырезы, контуры в отверстиях).
     pub holes: Vec<Ring>,
+    /// Незамкнутые линии внутри детали.
+    pub lines: Vec<Vec<Pt>>,
 }
 
 impl Shape {
@@ -100,12 +104,23 @@ impl Shape {
                 h.reverse();
             }
         }
-        Self { outer, holes }
+        Self { outer, holes, lines: Vec::new() }
     }
 
-    /// Площадь материала: внешний контур минус отверстия.
+    /// Площадь по внешнему контуру: столько ткани деталь занимает в раскладке.
     pub fn area(&self) -> f64 {
-        signed_area(&self.outer) + self.holes.iter().map(|h| signed_area(h)).sum::<f64>()
+        signed_area(&self.outer)
+    }
+
+    /// Площадь материала по правилу чёт-нечет: контур на нечётной глубине вычитается, на чётной добавляется.
+    pub fn net_area(&self) -> f64 {
+        let depth = |h: &Ring| self.holes.iter().filter(|o| !std::ptr::eq(*o, h) && point_in_ring(h[0], o)).count();
+        self.area()
+            - self
+                .holes
+                .iter()
+                .map(|h| if depth(h) % 2 == 0 { signed_area(h).abs() } else { -signed_area(h).abs() })
+                .sum::<f64>()
     }
 
     pub fn bbox(&self) -> BBox {
@@ -117,6 +132,7 @@ impl Shape {
         Shape {
             outer: map(&self.outer),
             holes: self.holes.iter().map(map).collect(),
+            lines: self.lines.iter().map(map).collect(),
         }
     }
 }

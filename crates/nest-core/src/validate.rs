@@ -73,7 +73,8 @@ pub fn validate_sheet(demands: &[Demand], sheet: &Sheet, gap: f64) -> Validation
         labels.push(format!("{} #{}", demands[p.part].part.name, copy_no[p.part]));
         let s = demands[p.part].part.shape.transformed(&p.transform);
         boxes.push(s.bbox());
-        polys.push(Polygon::new(ring_to_ls(&s.outer), s.holes.iter().map(ring_to_ls).collect()));
+        // Раскладка идёт по внешнему контуру, вложение в отверстия не допускается.
+        polys.push(Polygon::new(ring_to_ls(&s.outer), vec![]));
     }
 
     let mut violations = Vec::new();

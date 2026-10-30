@@ -37,6 +37,9 @@ pub fn write_sheet(path: &Path, demands: &[Demand], sheet: &Sheet) -> Result<()>
         for h in &s.holes {
             d.add_entity(polyline(h, LAYER_PARTS));
         }
+        for l in &s.lines {
+            d.add_entity(open_polyline(l, LAYER_PARTS));
+        }
         d.add_entity(label(&part.name, &s));
     }
 
@@ -47,6 +50,14 @@ fn polyline(ring: &Ring, layer: &str) -> Entity {
     let mut pl = LwPolyline::default();
     pl.set_is_closed(true);
     pl.vertices = ring.iter().map(|p| LwPolylineVertex { x: p.x, y: p.y, ..Default::default() }).collect();
+    let mut e = Entity::new(EntityType::LwPolyline(pl));
+    e.common.layer = layer.into();
+    e
+}
+
+fn open_polyline(pts: &[Pt], layer: &str) -> Entity {
+    let mut pl = LwPolyline::default();
+    pl.vertices = pts.iter().map(|p| LwPolylineVertex { x: p.x, y: p.y, ..Default::default() }).collect();
     let mut e = Entity::new(EntityType::LwPolyline(pl));
     e.common.layer = layer.into();
     e
