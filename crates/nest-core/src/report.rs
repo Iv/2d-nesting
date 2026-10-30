@@ -28,7 +28,19 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
     let _ = writeln!(s);
 
     let part_area = |i: usize| demands[i].part.shape.area();
+    // A free strip along the top edge at least this wide is kept for other parts, not wasted.
+    const REUSABLE_STRIP: f64 = 200.0;
+    let top_strip = |sh: &crate::geom::Sheet| {
+        let used_width = sh
+            .placements
+            .iter()
+            .map(|p| demands[p.part].part.shape.transformed(&p.transform).bbox().max.y)
+            .fold(0.0, f64::max);
+        let free = sh.width - used_width;
+        if free >= REUSABLE_STRIP { free } else { 0.0 }
+    };
     let mut total_area = 0.0;
+    let mut reusable_area = 0.0;
     for (n, sheet) in r.sheets.iter().enumerate() {
         let placed_area: f64 = sheet.placements.iter().map(|p| part_area(p.part)).sum();
         total_area += placed_area;
@@ -40,6 +52,15 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         let _ = writeln!(s, "  Parts area:         {:.4} m² (by outer contour)", placed_area / 1e6);
         let _ = writeln!(s, "  Used length:        {:.1} of {:.0} mm", sheet.used_length, sheet.length);
         let _ = writeln!(s, "  Utilisation:        {:.2}% of the sheet, {:.2}% of the used length", pct(sheet_area), pct(used_area));
+        let strip = top_strip(sheet);
+        if strip > 0.0 {
+            reusable_area += strip * sheet.used_length;
+            let _ = writeln!(
+                s,
+                "  Free top strip:     {strip:.0} mm wide (reusable); {:.2}% without it",
+                pct(used_area - strip * sheet.used_length)
+            );
+        }
         if let Some(v) = validations.get(n) {
             let _ = writeln!(s, "  {}", v.to_string().trim_end().replace('\n', "\n  "));
         }
@@ -53,6 +74,13 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         let _ = writeln!(s, "  Fabric used:        {:.3} m (sum of the used lengths, each sheet cut straight)", used / 1000.0);
         let _ = writeln!(s, "  Parts area:         {:.4} m²", total_area / 1e6);
         let _ = writeln!(s, "  Utilisation:        {:.2}% of the used fabric", total_area / (used * params.width) * 100.0);
+        if reusable_area > 0.0 {
+            let _ = writeln!(
+                s,
+                "  Without top strips: {:.2}% (free strips of {REUSABLE_STRIP:.0} mm and more along the top are reusable)",
+                total_area / (used * params.width - reusable_area) * 100.0
+            );
+        }
         let _ = writeln!(
             s,
             "  Lower bound:        {:.3} m of fabric, {:.2} sheets (by area)",

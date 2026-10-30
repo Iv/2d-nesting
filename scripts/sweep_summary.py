@@ -10,7 +10,7 @@ import sys
 
 def parse(report: str):
     fabric = re.search(r"Fabric used:\s+([\d.]+) m", report)
-    util = re.search(r"Utilisation:\s+([\d.]+)% of the used fabric", report)
+    util = re.search(r"Without top strips:\s+([\d.]+)%", report) or re.search(r"Utilisation:\s+([\d.]+)% of the used fabric", report)
     sheets = re.search(r"Sheets:\s+(\d+)", report)
     ok = "validation FAILED" not in report
     if not (fabric and util and sheets):
@@ -28,7 +28,8 @@ def main():
             rows.append((r, rep.parent))
     if not rows:
         sys.exit(f"no finished runs under {root}")
-    rows.sort(key=lambda x: (not x[0][3], x[0][0]))
+    # Fewer sheets (re-spreads) first, then less fabric.
+    rows.sort(key=lambda x: (not x[0][3], x[0][2], x[0][0]))
     print(f"{len(rows)} runs, best {top}:")
     print(f"{'fabric, m':>10} {'util, %':>8} {'sheets':>6}  valid  run")
     for (fabric, util, sheets, ok), path in rows[:top]:

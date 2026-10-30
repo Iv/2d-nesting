@@ -65,6 +65,10 @@ struct ExtractLabelledArgs {
     #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
     region: Option<Vec<f64>>,
 
+    /// Column boundaries along x (drawing units); without them columns are found from overlapping parts
+    #[arg(long, value_delimiter = ',', allow_negative_numbers = true)]
+    split_x: Vec<f64>,
+
     /// Output folder; parts go to <out>/<group>/
     #[arg(short, long)]
     out: PathBuf,
@@ -211,7 +215,7 @@ fn extract_labelled(args: ExtractLabelledArgs) -> Result<()> {
         min: nest_core::geom::Pt::new(r[0].min(r[2]), r[1].min(r[3])),
         max: nest_core::geom::Pt::new(r[0].max(r[2]), r[1].max(r[3])),
     });
-    let parts = nest_core::extract::extract_labelled(&args.input, &headings, region, &opts, &args.out)?;
+    let parts = nest_core::extract::extract_labelled(&args.input, &headings, region, &args.split_x, &opts, &args.out)?;
     let mut groups: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
     for p in &parts {
         groups.entry(p.group.as_str()).or_default().push(p.name.as_str());

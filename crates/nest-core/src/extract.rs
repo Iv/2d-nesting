@@ -148,7 +148,7 @@ mod tests {
 pub struct LabelledPart {
     pub name: String,
     pub path: PathBuf,
-    /// Output group: the heading's section and its extra text, e.g. `top_color1`.
+    /// Output group: section and drawing column, e.g. `top_col2`.
     pub group: String,
     pub entities: usize,
 }
@@ -159,12 +159,14 @@ pub struct LabelledPart {
 /// closed contour around the label, and holds every model-space entity lying inside that contour
 /// (within `edge_tolerance`). The section comes from the nearest heading text to the left of the
 /// label (`headings`: heading text prefix -> section name, e.g. `TOP` -> `top`); labels with no heading
-/// are skipped, as are labels outside `region`. Parts are written as
-/// `<out>/<group>/<section>_<number><letter>.dxf`, one folder per heading, each with a `parts.toml`.
+/// are skipped, as are labels outside `region`. Parts are grouped by drawing column (parts whose x
+/// extents overlap, or the intervals between `split_x`), numbered left to right within the section, and written as
+/// `<out>/<section>_col<k>/<section>_<number><letter>.dxf`, each folder with a `parts.toml`.
 pub fn extract_labelled(
     src: &Path,
     headings: &[(String, String)],
     region: Option<crate::geom::BBox>,
+    split_x: &[f64],
     opts: &crate::dxf_in::ImportOptions,
     out_dir: &Path,
 ) -> Result<Vec<LabelledPart>> {
@@ -234,6 +236,7 @@ pub fn extract_labelled(
     log::info!("loose entities {}, closed contours {}, headings {}", loose.len(), rings.len(), heading_pos.len());
     struct Found {
         name: String,
+        section: String,
         group: String,
         ring: usize,
     }
@@ -251,7 +254,41 @@ pub fn extract_labelled(
             log::warn!("label {text} at ({:.0}, {:.0}) is not inside any closed contour", at.x, at.y);
             continue;
         };
-        found.push(Found { name: format!("{section}_{number}{letter}"), group: group.clone(), ring });
+        found.push(Found { name: format!("{section}_{number}{letter}"), section: section.clone(), group: group.clone(), ring });
+    }
+
+    // Groups are the columns of the drawing, numbered left to right within their section
+    // (`top_col1`, `top_col2`, ...). With `split_x` a column is the interval between consecutive
+    // splits that holds the part's centre; otherwise parts whose x extents overlap form a column.
+    {
+        let span = |f: &Found| {
+            let b = crate::geom::BBox::of(rings[f.ring].iter().copied());
+            (b.min.x, b.max.x)
+        };
+        let mut order: Vec<usize> = (0..found.len()).collect();
+        order.sort_by(|&a, &b| span(&found[a]).0.total_cmp(&span(&found[b]).0));
+        let mut column = vec![0usize; found.len()];
+        let (mut n_cols, mut reach) = (0usize, f64::NEG_INFINITY);
+        for &i in &order {
+            let (x0, x1) = span(&found[i]);
+            column[i] = if split_x.is_empty() {
+                if x0 > reach {
+                    n_cols += 1;
+                }
+                reach = reach.max(x1);
+                n_cols
+            } else {
+                split_x.iter().filter(|&&x| x < (x0 + x1) / 2.0).count()
+            };
+        }
+        let mut per_section: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        for (i, f) in found.iter().enumerate() {
+            per_section.entry(f.section.clone()).or_default().insert(column[i]);
+        }
+        for (i, f) in found.iter_mut().enumerate() {
+            let k = per_section[&f.section].iter().position(|&c| c == column[i]).unwrap() + 1;
+            f.group = format!("{}_col{k}", f.section);
+        }
     }
 
     // Each entity goes to the smallest labelled contour it lies in.
@@ -275,7 +312,7 @@ pub fn extract_labelled(
             log::warn!("{}: label used twice, keeping the first", f.name);
             continue;
         }
-        let ents = members.remove(&f.ring).unwrap_or_default();
+        let ents = dedup_outline(members.remove(&f.ring).unwrap_or_default(), &rings[f.ring], scale);
         let group = f.group.clone();
         let dir = out_dir.join(&group);
         fs::create_dir_all(&dir).with_context(|| format!("{}: cannot create directory", dir.display()))?;
@@ -289,7 +326,7 @@ pub fn extract_labelled(
             nd.add_layer(Layer { name: l.clone(), color: srcl.map(|x| x.color.clone()).unwrap_or_default(), ..Default::default() });
         }
         for e in &ents {
-            nd.add_entity((*e).clone());
+            nd.add_entity(e.clone());
         }
         let path = dir.join(format!("{}.dxf", f.name));
         nd.save_file(&path).with_context(|| format!("{}: cannot write", path.display()))?;
@@ -313,4 +350,40 @@ pub fn extract_labelled(
         fs::write(&mpath, m).with_context(|| format!("{}: cannot write", mpath.display()))?;
     }
     Ok(out)
+}
+
+/// Drawings often trace a part's outline twice (e.g. a cut line and a sewing line of another colour
+/// a millimetre apart). Of the closed polylines matching the part contour's extent, only the largest
+/// is kept, and it is made white so the outline always looks the same.
+fn dedup_outline(ents: Vec<&dxf::entities::Entity>, contour: &[crate::geom::Pt], scale: f64) -> Vec<dxf::entities::Entity> {
+    use crate::geom::{signed_area, BBox, Pt};
+    /// How far the extents of two outlines may differ and still count as the same outline, mm.
+    const SAME_OUTLINE: f64 = 5.0;
+    let target = BBox::of(contour.iter().copied());
+    let outline = |e: &dxf::entities::Entity| -> Option<f64> {
+        let EntityType::LwPolyline(pl) = &e.specific else { return None };
+        let pts: Vec<Pt> = pl.vertices.iter().map(|v| Pt::new(v.x * scale, v.y * scale)).collect();
+        let closed = pl.flags & 1 != 0 || pts.len() > 2 && pts[0].dist(*pts.last().unwrap()) < 0.5;
+        let b = BBox::of(pts.iter().copied());
+        let same = (b.min.x - target.min.x).abs().max((b.min.y - target.min.y).abs())
+            .max((b.max.x - target.max.x).abs()).max((b.max.y - target.max.y).abs()) <= SAME_OUTLINE;
+        (closed && same).then(|| signed_area(&pts).abs())
+    };
+    let keep = ents
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| outline(e).map(|a| (i, a)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i);
+    ents.iter()
+        .enumerate()
+        .filter(|&(i, e)| Some(i) == keep || outline(e).is_none())
+        .map(|(i, e)| {
+            let mut e = (*e).clone();
+            if Some(i) == keep {
+                e.common.color = dxf::Color::from_index(7);
+            }
+            e
+        })
+        .collect()
 }
