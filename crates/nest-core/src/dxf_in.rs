@@ -52,8 +52,12 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
         .unwrap_or_default();
     let drawing = Drawing::load_file(path)
         .with_context(|| format!("{}: не удалось прочитать DXF", path.display()))?;
-    let shape = shape_from_drawing(&drawing, opts)
+    let mut warnings = Vec::new();
+    let shape = shape_from_drawing(&drawing, opts, &mut warnings)
         .with_context(|| format!("{}", path.display()))?;
+    for w in warnings {
+        warn!("{}: {w}", path.display());
+    }
     Ok(Part {
         name,
         source: path.to_path_buf(),
@@ -62,11 +66,11 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
 }
 
 /// Множитель перевода единиц чертежа в мм.
-fn unit_scale(units: Units) -> Result<f64> {
+fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
     Ok(match units {
         Units::Millimeters => 1.0,
         Units::Unitless => {
-            warn!("$INSUNITS не задан, считаю единицы миллиметрами");
+            warnings.push("$INSUNITS не задан, считаю единицы миллиметрами".into());
             1.0
         }
         Units::Centimeters => 10.0,
@@ -79,13 +83,15 @@ fn unit_scale(units: Units) -> Result<f64> {
     })
 }
 
-pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions) -> Result<Shape> {
-    let scale = unit_scale(drawing.header.default_drawing_units)?;
+/// Собирает деталь из чертежа; некритичные замечания добавляются в `warnings`.
+pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions, warnings: &mut Vec<String>) -> Result<Shape> {
+    let scale = unit_scale(drawing.header.default_drawing_units, warnings)?;
     let mut collector = Collector {
         drawing,
         opts,
         pieces: Vec::new(),
         skipped: BTreeMap::new(),
+        warnings,
     };
     let root = Affine::scale(scale);
     for e in drawing.entities() {
@@ -105,22 +111,27 @@ pub fn shape_from_drawing(drawing: &Drawing, opts: &ImportOptions) -> Result<Sha
             .map(|(l, n)| format!("слой \"{l}\": {n}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // Разрыв между началом и концом цепочки подсказывает, хватит ли увеличить --join-tolerance.
+        let mut gaps: Vec<f64> = open.iter().map(|(c, _)| c[0].dist(*c.last().unwrap())).collect();
+        gaps.sort_by(f64::total_cmp);
+        let gaps = gaps.iter().take(3).map(|g| format!("{g:.3}")).collect::<Vec<_>>().join(", ");
         bail!(
-            "{} незамкнутых контуров ({detail}). Замкните контуры в чертеже или исключите слой через --ignore-layers",
+            "{} незамкнутых контуров ({detail}; разрыв между концами цепочек, мм: {gaps}). \
+             Замкните контуры в чертеже, увеличьте --join-tolerance или исключите слой через --ignore-layers",
             open.len()
         );
     }
-    classify(rings)
+    classify(rings, collector.warnings)
 }
 
 /// Внешний контур = наибольший по площади, остальные должны лежать внутри него и становятся отверстиями.
-fn classify(rings: Vec<(Ring, String)>) -> Result<Shape> {
+fn classify(rings: Vec<(Ring, String)>, warnings: &mut Vec<String>) -> Result<Shape> {
     let mut rings: Vec<(Ring, String)> = rings
         .into_iter()
         .filter(|(r, layer)| {
             let ok = r.len() >= 3 && signed_area(r).abs() > 1e-6;
             if !ok {
-                warn!("вырожденный контур на слое \"{layer}\" пропущен");
+                warnings.push(format!("вырожденный контур на слое \"{layer}\" пропущен"));
             }
             ok
         })
@@ -195,6 +206,7 @@ struct Collector<'a> {
     /// Полилинии в мм вместе со слоем.
     pieces: Vec<(Vec<Pt>, String)>,
     skipped: BTreeMap<&'static str, usize>,
+    warnings: &'a mut Vec<String>,
 }
 
 impl Collector<'_> {
@@ -242,7 +254,7 @@ impl Collector<'_> {
                 Some(map(&ocs(pl.normal.z), pts))
             }
             EntityType::Ellipse(el) => Some(ellipse_points(el, tol)),
-            EntityType::Spline(sp) => Some(spline_points(sp, tol, &layer)?),
+            EntityType::Spline(sp) => Some(spline_points(sp, tol, &layer, self.warnings)?),
             EntityType::Insert(ins) => {
                 self.insert(ins, xf, &layer, depth)?;
                 None
@@ -385,12 +397,12 @@ fn ellipse_points(el: &dxf::entities::Ellipse, tol: f64) -> Vec<Pt> {
     pts
 }
 
-fn spline_points(sp: &dxf::entities::Spline, tol: f64, layer: &str) -> Result<Vec<Pt>> {
+fn spline_points(sp: &dxf::entities::Spline, tol: f64, layer: &str, warnings: &mut Vec<String>) -> Result<Vec<Pt>> {
     let p = sp.degree_of_curve.max(1) as usize;
     let ctrl: Vec<Pt> = sp.control_points.iter().map(p2).collect();
     if ctrl.is_empty() {
         if sp.fit_points.len() >= 2 {
-            warn!("слой \"{layer}\": SPLINE без контрольных точек, беру точки интерполяции как полилинию");
+            warnings.push(format!("слой \"{layer}\": SPLINE без контрольных точек, беру точки интерполяции как полилинию"));
             return Ok(sp.fit_points.iter().map(p2).collect());
         }
         bail!("слой \"{layer}\": пустой SPLINE");
@@ -483,49 +495,63 @@ fn dist_to_segment(p: Pt, a: Pt, b: Pt) -> f64 {
 }
 
 /// Сшивает куски в замкнутые контуры. Возвращает (замкнутые, незамкнутые).
+/// Куски короче допуска отбрасываются: их концы и так считаются совпадающими.
 #[allow(clippy::type_complexity)]
 fn chain(pieces: Vec<(Vec<Pt>, String)>, tol: f64) -> (Vec<(Ring, String)>, Vec<(Vec<Pt>, String)>) {
     let mut closed = Vec::new();
     let mut open: Vec<(Vec<Pt>, String)> = Vec::new();
     for (pts, layer) in pieces {
+        let len: f64 = pts.windows(2).map(|w| w[0].dist(w[1])).sum();
+        if len <= tol {
+            continue;
+        }
         if pts.len() >= 4 && pts[0].dist(*pts.last().unwrap()) <= tol {
             closed.push((finish_ring(pts), layer));
         } else {
             open.push((pts, layer));
         }
     }
+    // Ближайший к точке p конец среди оставшихся кусков: (индекс, совпал конец, а не начало).
+    let nearest = |open: &[(Vec<Pt>, String)], p: Pt| -> Option<(usize, bool)> {
+        open.iter()
+            .enumerate()
+            .flat_map(|(i, (q, _))| [(i, false, q[0].dist(p)), (i, true, q.last().unwrap().dist(p))])
+            .filter(|&(_, _, d)| d <= tol)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(i, rev, _)| (i, rev))
+    };
     let mut leftover = Vec::new();
     while let Some((mut cur, layer)) = open.pop() {
+        let mut reversed_once = false;
         loop {
-            let end = *cur.last().unwrap();
-            let start = cur[0];
-            if cur.len() >= 4 && start.dist(end) <= tol {
+            let (start, end) = (cur[0], *cur.last().unwrap());
+            let closing = start.dist(end);
+            let next = nearest(&open, end);
+            // Замыкаем, если начало цепочки ближе любого продолжения.
+            let next_dist = next.map(|(i, rev)| {
+                let q = &open[i].0;
+                if rev { q.last().unwrap().dist(end) } else { q[0].dist(end) }
+            });
+            if cur.len() >= 4 && closing <= tol && next_dist.is_none_or(|d| closing <= d) {
                 closed.push((finish_ring(cur), layer));
                 break;
             }
-            let found = open.iter().position(|(q, _)| {
-                q[0].dist(end) <= tol || q.last().unwrap().dist(end) <= tol
-            });
-            match found {
-                Some(i) => {
+            match next {
+                Some((i, rev)) => {
                     let (mut q, _) = open.swap_remove(i);
-                    if q[0].dist(end) > tol {
+                    if rev {
                         q.reverse();
                     }
                     cur.extend_from_slice(&q[1..]);
                 }
+                None if !reversed_once => {
+                    // Продолжение может быть с другого конца.
+                    reversed_once = true;
+                    cur.reverse();
+                }
                 None => {
-                    // Возможно, продолжение есть с другого конца.
-                    let back = open.iter().position(|(q, _)| {
-                        q[0].dist(start) <= tol || q.last().unwrap().dist(start) <= tol
-                    });
-                    match back {
-                        Some(_) => cur.reverse(),
-                        None => {
-                            leftover.push((cur, layer));
-                            break;
-                        }
-                    }
+                    leftover.push((cur, layer));
+                    break;
                 }
             }
         }

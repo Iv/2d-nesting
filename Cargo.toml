@@ -9,6 +9,7 @@ rust-version = "1.90"
 license = "MIT"
 
 [workspace.dependencies]
+ctrlc = "3.5"
 nest-core = { path = "crates/nest-core" }
 sparrow = { path = "../sparrow" }
 jagua-rs = { version = "=1.1.0", features = ["spp"] }
