@@ -123,6 +123,10 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     close_gaps: f64,
 
+    /// Also write part names as text on layer LABELS in the DXF
+    #[arg(long)]
+    labels: bool,
+
     /// Treat any open line as an error, even inside a part
     #[arg(long)]
     strict_open: bool,
@@ -211,7 +215,8 @@ fn run(cli: RunArgs) -> Result<bool> {
     let command: Vec<String> = std::env::args().collect();
     std::fs::write(out_dir.join("command.txt"), command.join(" ") + "\n")?;
 
-    let out = nest_core::run(&cli.input, &out_dir, &import, &params)?;
+    let dxf_opts = nest_core::dxf_out::DxfOptions { labels: cli.labels };
+    let out = nest_core::run(&cli.input, &out_dir, &import, &params, dxf_opts)?;
     println!("{}", out.report);
     for f in &out.sheet_files {
         println!("Wrote {}", f.display());

@@ -35,8 +35,12 @@ fn params(gap: f64, rotations: Vec<f64>, seed: u64) -> NestParams {
 fn layer_counts(path: &Path) -> (usize, usize, usize) {
     let d = Drawing::load_file(path).unwrap();
     let count = |l: &str| d.entities().filter(|e| e.common.layer == l).count();
-    let texts = d.entities().filter(|e| matches!(e.specific, EntityType::Text(_))).count();
-    assert_eq!(texts, count("LABELS"));
+    // Every part is an INSERT on PARTS whose block holds the source entities.
+    for e in d.entities().filter(|e| e.common.layer == "PARTS") {
+        let EntityType::Insert(ins) = &e.specific else { panic!("PARTS holds only inserts") };
+        let b = d.blocks().find(|b| b.name == ins.name).expect("block of the insert");
+        assert!(!b.entities.is_empty());
+    }
     (count("SHEET"), count("PARTS"), count("LABELS"))
 }
 
@@ -45,7 +49,7 @@ fn full_run_with_gap_is_valid() {
     let input = job_dir();
     let out = tempfile::tempdir().unwrap();
     let p = params(3.0, vec![0.0, 180.0], 42);
-    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p, Default::default()).unwrap();
 
     assert!(job.valid(), "{}", job.validations[0]);
     let sheet = &job.outcome.result.sheets[0];
@@ -60,9 +64,9 @@ fn full_run_with_gap_is_valid() {
     // Only 0° or 180°.
     assert!(sheet.placements.iter().all(|pl| [0.0, 180.0].contains(&pl.transform.rotation_deg)));
 
-    // The DXF reads back: 1 sheet rectangle, contours with holes (frame × 2 = 3 contours each), labels.
+    // The DXF reads back: 1 sheet rectangle, one insert per part, no labels by default.
     let (s, parts, labels) = layer_counts(&job.sheet_files[0]);
-    assert_eq!((s, parts, labels), (1, 23 + 2 * 2, 23));
+    assert_eq!((s, parts, labels), (1, 23, 0));
     let report = fs::read_to_string(out.path().join("report.txt")).unwrap();
     assert!(report.contains("Utilisation") && report.contains("validation passed"));
 }
@@ -72,7 +76,7 @@ fn same_seed_and_iterations_give_same_layout() {
     let input = job_dir();
     let run = |seed| {
         let out = tempfile::tempdir().unwrap();
-        let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(0.0, vec![0.0, 180.0], seed)).unwrap();
+        let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(0.0, vec![0.0, 180.0], seed), Default::default()).unwrap();
         assert!(job.valid());
         job.outcome.result.sheets[0]
             .placements
@@ -89,7 +93,7 @@ fn fixed_orientation_and_too_wide_parts() {
     // A part wider than the fabric at every angle ends up unplaced.
     save(input.path(), "huge", dxf::enums::Units::Millimeters, vec![on("0", rect(0.0, 0.0, 1700.0, 1700.0))]);
     let out = tempfile::tempdir().unwrap();
-    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(2.0, vec![0.0], 1)).unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(2.0, vec![0.0], 1), Default::default()).unwrap();
     assert!(job.valid(), "{}", job.validations[0]);
     let r = &job.outcome.result;
     assert!(r.sheets[0].placements.iter().all(|pl| pl.transform.rotation_deg == 0.0));
@@ -106,7 +110,7 @@ fn rotation_tolerance_expands_angles() {
     let input = job_dir();
     let out = tempfile::tempdir().unwrap();
     let p = NestParams { rotation_tolerance: 10.0, rotation_step: 5.0, ..params(1.0, vec![0.0, 90.0, 180.0, 270.0], 3) };
-    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p, Default::default()).unwrap();
     assert!(job.valid(), "{}", job.validations[0]);
     let allowed = p.allowed_angles();
     assert!(job.outcome.result.sheets[0].placements.iter().all(|pl| allowed.contains(&pl.transform.rotation_deg)));
@@ -118,7 +122,7 @@ fn parts_are_spread_over_fixed_size_sheets() {
     let out = tempfile::tempdir().unwrap();
     // A short sheet: the 23 parts need several sheets.
     let p = NestParams { width: 700.0, length: 900.0, ..params(2.0, vec![0.0, 90.0, 180.0, 270.0], 5) };
-    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p, Default::default()).unwrap();
     let r = &job.outcome.result;
     assert!(r.sheets.len() >= 3, "{} sheets", r.sheets.len());
     assert!(r.unplaced.is_empty());

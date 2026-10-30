@@ -1,25 +1,118 @@
-//! Writes a sheet to DXF: layer SHEET (sheet rectangle), PARTS (part geometry), LABELS (names).
+//! Writes a sheet to DXF: layer SHEET (sheet rectangle) and PARTS (one INSERT per placed part).
+//!
+//! Every part is written as a block holding all entities of its source DXF, on all layers and
+//! unchanged (marks, texts, arcs, …), so nothing of the drawing is lost or approximated. Block
+//! entities on layer "0" take the PARTS layer of the insert; the others keep their own layers,
+//! whose colours, line types and text styles are copied from the sources.
 
 use crate::geom::{point_in_ring, Demand, Pt, Ring, Shape, Sheet};
 use anyhow::{Context, Result};
-use dxf::entities::{Entity, EntityType, LwPolyline, Text};
+use dxf::entities::{Entity, EntityType, Insert, LwPolyline, Text};
 use dxf::LwPolylineVertex;
 use dxf::enums::{AcadVersion, HorizontalTextJustification, Units, VerticalTextJustification};
-use dxf::tables::Layer;
-use dxf::{Color, Drawing, Point};
+use dxf::tables::{Layer, LineType, Style};
+use dxf::{Block, Color, Drawing, Point};
 use geo::InteriorPoint;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub const LAYER_SHEET: &str = "SHEET";
 pub const LAYER_PARTS: &str = "PARTS";
 pub const LAYER_LABELS: &str = "LABELS";
 
-pub fn write_sheet(path: &Path, demands: &[Demand], sheet: &Sheet) -> Result<()> {
+/// Source geometry of every part, ready to be written as blocks.
+pub struct PartLibrary {
+    /// Per demand: block name, its blocks (the part plus nested ones) and the unit scale to mm.
+    parts: Vec<(String, Vec<Block>, f64)>,
+    layers: BTreeMap<String, Layer>,
+    line_types: BTreeMap<String, LineType>,
+    styles: BTreeMap<String, Style>,
+}
+
+impl PartLibrary {
+    /// Loads the source DXF of every part.
+    pub fn load(demands: &[Demand]) -> Result<Self> {
+        let mut lib = PartLibrary { parts: Vec::new(), layers: BTreeMap::new(), line_types: BTreeMap::new(), styles: BTreeMap::new() };
+        let mut cache: HashMap<&Path, Drawing> = HashMap::new();
+        for (i, d) in demands.iter().enumerate() {
+            let src = d.part.source.as_path();
+            if !cache.contains_key(src) {
+                let dr = Drawing::load_file(src).with_context(|| format!("{}: cannot read DXF", src.display()))?;
+                cache.insert(src, dr);
+            }
+            let dr = &cache[src];
+            // With duplicate layer entries the last one wins: older files written by `nest extract`
+            // carry a default copy before the real one.
+            let mut own: BTreeMap<String, Layer> = BTreeMap::new();
+            for l in dr.layers() {
+                own.insert(l.name.clone(), Layer { name: l.name.clone(), color: l.color.clone(), line_type_name: l.line_type_name.clone(), ..Default::default() });
+            }
+            for (n, l) in own {
+                lib.layers.entry(n).or_insert(l);
+            }
+            for t in dr.line_types() {
+                lib.line_types.entry(t.name.clone()).or_insert_with(|| LineType { handle: dxf::Handle::empty(), ..t.clone() });
+            }
+            for st in dr.styles() {
+                lib.styles.entry(st.name.clone()).or_insert_with(|| Style { handle: dxf::Handle::empty(), ..st.clone() });
+            }
+            // Block names must be unique across parts; nested blocks get the part's prefix too.
+            let name = format!("P{i}_{}", sanitize(&d.part.name));
+            let rename = |n: &str| format!("{name}__{}", sanitize(n));
+            let fix = |e: &Entity| -> Entity {
+                let mut e = e.clone();
+                e.common.handle = dxf::Handle::empty();
+                if let EntityType::Insert(ins) = &mut e.specific {
+                    ins.name = rename(&ins.name);
+                }
+                e
+            };
+            let mut blocks = Vec::new();
+            for b in dr.blocks().filter(|b| !b.name.starts_with('*')) {
+                let mut nb = Block { name: rename(&b.name), base_point: b.base_point.clone(), ..Default::default() };
+                nb.entities = b.entities.iter().map(fix).collect();
+                blocks.push(nb);
+            }
+            let mut main = Block { name: name.clone(), ..Default::default() };
+            main.entities = dr.entities().filter(|e| !e.common.is_in_paper_space).map(fix).collect();
+            blocks.push(main);
+            let scale = crate::dxf_in::unit_scale(dr.header.default_drawing_units, &mut Vec::new())?;
+            lib.parts.push((name, blocks, scale));
+        }
+        Ok(lib)
+    }
+}
+
+/// Output options.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DxfOptions {
+    /// Add the part name as text on layer LABELS.
+    pub labels: bool,
+}
+
+pub fn write_sheet(path: &Path, demands: &[Demand], lib: &PartLibrary, sheet: &Sheet, opts: DxfOptions) -> Result<()> {
     let mut d = Drawing::new();
     d.header.version = AcadVersion::R2000;
     d.header.default_drawing_units = Units::Millimeters;
+    for t in lib.line_types.values() {
+        if !d.line_types().any(|x| x.name.eq_ignore_ascii_case(&t.name)) {
+            d.add_line_type(t.clone());
+        }
+    }
+    for st in lib.styles.values() {
+        if !d.styles().any(|x| x.name.eq_ignore_ascii_case(&st.name)) {
+            d.add_style(st.clone());
+        }
+    }
+    for l in lib.layers.values() {
+        if !d.layers().any(|x| x.name.eq_ignore_ascii_case(&l.name)) {
+            d.add_layer(l.clone());
+        }
+    }
     for (name, color) in [(LAYER_SHEET, 8u8), (LAYER_PARTS, 7), (LAYER_LABELS, 3)] {
-        d.add_layer(Layer { name: name.into(), color: Color::from_index(color), ..Default::default() });
+        if name != LAYER_LABELS || opts.labels {
+            d.add_layer(Layer { name: name.into(), color: Color::from_index(color), ..Default::default() });
+        }
     }
 
     let rect = vec![
@@ -30,34 +123,46 @@ pub fn write_sheet(path: &Path, demands: &[Demand], sheet: &Sheet) -> Result<()>
     ];
     d.add_entity(polyline(&rect, LAYER_SHEET));
 
+    let mut used: Vec<bool> = vec![false; lib.parts.len()];
     for p in &sheet.placements {
-        let part = &demands[p.part].part;
-        let s = part.shape.transformed(&p.transform);
-        d.add_entity(polyline(&s.outer, LAYER_PARTS));
-        for h in &s.holes {
-            d.add_entity(polyline(h, LAYER_PARTS));
+        if !used[p.part] {
+            used[p.part] = true;
+            for b in &lib.parts[p.part].1 {
+                d.add_block(b.clone());
+            }
         }
-        for l in &s.lines {
-            d.add_entity(open_polyline(l, LAYER_PARTS));
+        let (name, _, scale) = &lib.parts[p.part];
+        // Sheet point = R·(scale·p) + t: exactly what an INSERT with these values does.
+        let ins = Insert {
+            name: name.clone(),
+            location: Point::new(p.transform.translation.x, p.transform.translation.y, 0.0),
+            rotation: p.transform.rotation_deg,
+            x_scale_factor: *scale,
+            y_scale_factor: *scale,
+            z_scale_factor: *scale,
+            ..Default::default()
+        };
+        let mut e = Entity::new(EntityType::Insert(ins));
+        e.common.layer = LAYER_PARTS.into();
+        d.add_entity(e);
+        if opts.labels {
+            let part = &demands[p.part].part;
+            d.add_entity(label(&part.name, &part.shape.transformed(&p.transform)));
         }
-        d.add_entity(label(&part.name, &s));
     }
 
     d.save_file(path).with_context(|| format!("{}: cannot write DXF", path.display()))
+}
+
+/// Block name -> safe DXF name.
+fn sanitize(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() || "-_".contains(c) { c } else { '_' }).collect()
 }
 
 fn polyline(ring: &Ring, layer: &str) -> Entity {
     let mut pl = LwPolyline::default();
     pl.set_is_closed(true);
     pl.vertices = ring.iter().map(|p| LwPolylineVertex { x: p.x, y: p.y, ..Default::default() }).collect();
-    let mut e = Entity::new(EntityType::LwPolyline(pl));
-    e.common.layer = layer.into();
-    e
-}
-
-fn open_polyline(pts: &[Pt], layer: &str) -> Entity {
-    let mut pl = LwPolyline::default();
-    pl.vertices = pts.iter().map(|p| LwPolylineVertex { x: p.x, y: p.y, ..Default::default() }).collect();
     let mut e = Entity::new(EntityType::LwPolyline(pl));
     e.common.layer = layer.into();
     e

@@ -76,7 +76,7 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
 }
 
 /// Scale factor from drawing units to mm.
-fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
+pub(crate) fn unit_scale(units: Units, warnings: &mut Vec<String>) -> Result<f64> {
     Ok(match units {
         Units::Millimeters => 1.0,
         Units::Unitless => {

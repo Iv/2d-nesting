@@ -80,14 +80,17 @@ pub fn extract_blocks(src: &Path, patterns: &[String], out_dir: &Path) -> Result
             nd.add_block(nb);
         }
 
-        let mut layers: BTreeSet<String> = BTreeSet::new();
-        for e in &b.entities {
-            layers.insert(e.common.layer.clone());
-            nd.add_entity(e.clone());
-        }
+        // Layers go in before the entities: adding an entity creates a missing layer with default
+        // settings, which would shadow the source layer's colour.
+        let layers: BTreeSet<String> = b.entities.iter().map(|e| e.common.layer.clone()).collect();
         for l in layers.iter().filter(|l| l.as_str() != "0") {
-            let color = d.layers().find(|x| &x.name == l).map(|x| x.color.clone()).unwrap_or_default();
-            nd.add_layer(Layer { name: l.clone(), color, ..Default::default() });
+            let src = d.layers().filter(|x| &x.name == l).last();
+            let color = src.map(|x| x.color.clone()).unwrap_or_default();
+            let line_type_name = src.map(|x| x.line_type_name.clone()).unwrap_or_else(|| "CONTINUOUS".into());
+            nd.add_layer(Layer { name: l.clone(), color, line_type_name, ..Default::default() });
+        }
+        for e in &b.entities {
+            nd.add_entity(e.clone());
         }
 
         let path = out_dir.join(format!("{}.dxf", sanitize(&b.name)));
