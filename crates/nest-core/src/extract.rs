@@ -50,6 +50,14 @@ pub fn extract_blocks(src: &Path, patterns: &[String], out_dir: &Path) -> Result
         // `*Model_Space` and friends are layout blocks; names with `$` are anonymous CAD-generated blocks.
         .filter(|b| !b.name.starts_with('*') && !b.name.contains('$') && patterns.iter().any(|p| glob_match(p, &b.name)))
         .collect();
+    // Block definitions never inserted in model space are leftovers in the drawing, not parts.
+    let (selected, unused): (Vec<&Block>, Vec<&Block>) = selected.into_iter().partition(|b| inserts.contains_key(&b.name));
+    if !unused.is_empty() {
+        log::warn!(
+            "skipped blocks not inserted in the drawing: {}",
+            unused.iter().map(|b| b.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
     if selected.is_empty() {
         bail!("{}: no blocks match {:?}", src.display(), patterns);
     }

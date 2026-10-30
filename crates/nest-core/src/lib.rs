@@ -86,20 +86,23 @@ fn write_overview(path: &Path, outcome: &NestOutcome, validations: &[Validation]
     use std::fmt::Write as _;
     let mut h = String::from(
         "<!doctype html><meta charset='utf-8'><title>Nesting</title>\
-         <style>body{font-family:sans-serif;margin:16px;background:#f4f4f4}img{width:100%;background:#fff;border:1px solid #999}\
+         <style>body{font-family:sans-serif;margin:16px;background:#f4f4f4}.sheet{background:#fff;border:1px solid #999;line-height:0}\
          h2{font-size:15px;margin:18px 0 6px}</style>",
     );
     for (i, s) in outcome.result.sheets.iter().enumerate() {
         let ok = validations.get(i).is_some_and(Validation::ok);
         let _ = write!(
             h,
-            "<h2>Sheet {} — {} parts, used {:.0} of {:.0} mm{}</h2><img src='sheet_{}.svg'>",
+            "<h2>Sheet {} — {} parts, used {:.0} of {:.0} mm{}</h2><div class='sheet'>{}</div>",
             i + 1,
             s.placements.len(),
             s.used_length,
             s.length,
             if ok { "" } else { " — VALIDATION FAILED" },
-            i + 1
+            // Inline the preview so the page is a single self-contained file.
+            fs::read_to_string(path.with_file_name(format!("sheet_{}.svg", i + 1)))
+                .unwrap_or_default()
+                .replacen("<svg ", "<svg style='width:100%;height:auto' ", 1)
         );
     }
     fs::write(path, h).with_context(|| format!("{}: cannot write", path.display()))
