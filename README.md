@@ -10,17 +10,22 @@ fixed-size sheets of fabric. DXF in, DXF out. Written in Rust; the packing engin
   open lines) travels with the part into the output.
 - Fixed sheets, e.g. 1560 × 5800 mm (the cutting table): sheets are filled one after another.
 - Allowed rotations: base angles (default 0/90/180/270) plus an optional ± tolerance.
+- Panels (names containing `top` or `bot`) are cut along the grain: they are turned so their long
+  axis lies along the fabric, and a deviation from that is penalised, the more the deviation, the
+  more the penalty. Ribs use the tolerance freely.
+- A free strip along the top of a sheet is reusable fabric, valued below fabric saved at the end.
+- Fillers: small parts of other jobs that go into free space without making a sheet longer.
+- Left-hand panels: parts are drawn as right-hand ones, the manifest asks for mirrored copies.
 - Gap between parts. No gap is added at the sheet edge: set the edge margin through the sheet size.
 - Every layout is checked independently of the solver (no overlaps, inside the sheet, gap kept).
 - Reproducible mode: a fixed seed plus an iteration budget gives the same layout every time.
 
 ## Build
 
-Requires Rust ≥ 1.90 and a checkout of sparrow next to this repository (`../sparrow`), which
-is used as a path dependency.
+Requires Rust ≥ 1.90. A patched copy of sparrow is in `vendor/sparrow` (see
+`vendor/sparrow/VENDORED.md`).
 
 ```bash
-git clone https://github.com/JeroenGar/sparrow ../sparrow
 cargo build --release
 ```
 
@@ -77,15 +82,20 @@ Use `--layers` / `--ignore-layers` to choose which DXF layers make up the part.
 [parts]
 rib1 = 2
 rib2 = { qty = 2 }
+top5 = { qty = 1, left = 1 }   # one as drawn (right) and one mirrored (left)
+bot5 = { right = 1, left = 1 } # `right` is the same as `qty`
 ```
 
 ```csv
-name,qty
+name,qty,left
 rib1,2
-rib2,2
+top5,1,1
 ```
 
 A part missing from the manifest gets quantity 1 (with a warning); quantity 0 leaves it out.
+
+Parts are taken as drawn, i.e. right-hand. `left` copies are mirrored across the Y axis (outer
+contour and everything inside) and appear as `<name>_L` in the layout and the report.
 
 ## Parameters of `nest run`
 
@@ -97,6 +107,12 @@ A part missing from the manifest gets quantity 1 (with a warning); quantity 0 le
 | `-r, --rotations` | 0,90,180,270 | base rotation angles, degrees; `0` disables rotation |
 | `--rotation-tolerance` | 0 | each base angle ± this, degrees |
 | `--rotation-step` | 1 | step within the tolerance, degrees |
+| `--panels` | top,bot | parts whose name contains one of these are panels |
+| `--tilt-penalty` | 10 | a panel d° off a base angle costs this · d² mm of length; 0 = off |
+| `--panel-axis` | long | panel grain: `long` (along the long axis) or `drawn` (drawing X axis) |
+| `--min-strip` | 150 | a free strip on top at least this wide, mm, is reusable; 0 = off |
+| `--strip-ratio` | 2 | fabric saved at the end is worth this many times the same area of strip |
+| `--fillers` | – | folder of filler parts for free space; may be repeated |
 | `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
 | `-t, --time-limit` | 60 | search time per sheet, s |
 | `-i, --iterations` | – | iteration budget per sheet instead of time (reproducible) |
@@ -105,6 +121,7 @@ A part missing from the manifest gets quantity 1 (with a warning); quantity 0 le
 | `--tolerance` | 0.2 | arc/spline approximation, mm |
 | `--join-tolerance` | 0.05 | joining segment ends into chains, mm |
 | `--close-gaps` | 1 | largest gap bridged when assembling the outer contour, mm |
+| `--edge-tolerance` | 2 | how far inner geometry may stick out of the outer contour, mm |
 | `--layers` | all | read only these layers |
 | `--ignore-layers` | – | skip these layers |
 | `--strict-open` | off | any open line is an error, even inside a part |
@@ -142,6 +159,49 @@ utilisation is parts area / (sheet width × sum of the used lengths).
 `--time-limit` is the budget per sheet, shared by the runs for that sheet.
 Parts that fit the sheet at no allowed angle are reported as unplaced.
 
+### Panel tilt
+
+Panels should be cut straight: a strip of fabric left free beside them is better than tilted
+panels. Both threads of the fabric are fine (warp and weft, i.e. 0/90/180/270°), any angle to
+them is not.
+
+Drawings often show panels at an angle, so before nesting every elongated panel (at least twice as
+long as wide, `--panel-axis long`, the default) is turned by at most 45° so that its long axis (the
+direction across which the panel is narrowest) lies along X. `-v` prints each turn. With
+`--panel-axis drawn` the drawing's X axis is taken as the grain instead.
+`cargo run --release --example axis -p nest-core -- <dir>` shows the long axis of every part as drawn.
+
+A panel placed d degrees off its base angle costs `--tilt-penalty` · d² mm (default 10:
+2° = 40 mm, 5° = 250 mm, 10° = 1 m). In sparrow (patched, `vendor/sparrow`):
+
+- among collision-free positions for a panel, the least tilted wins; half of the samples are taken
+  at straight angles;
+- the initial placement counts the penalty as extra length.
+
+Each solver run keeps every feasible layout it found, and the one with the least used length +
+penalty is used (a layout that fits the sheet length always wins over one that does not). The report
+shows per sheet how many panels are tilted and the largest tilt.
+
+### Free strip on top
+
+A free band along the top of a sheet, at least `--min-strip` wide (150 mm), takes other parts later,
+so it is not counted as waste. It is worth less than fabric saved at the end of the sheet, though:
+`--strip-ratio` k (default 2) says that a metre of length saved is worth k metres of the same width in
+the strip. A sheet then consumes `used length · (1 − strip / (k · width))`.
+
+When all sheets are made, every sheet with spare length is nested again into narrower strips
+(leaving 150 mm, the most the parts allow, and halfway between), and the variant consuming least
+(tilt penalty included) is kept. The report shows the strip per sheet and the total
+"Fabric consumed"; `sweep_summary.py` ranks runs by it.
+
+### Fillers
+
+`--fillers <dir>` (may be repeated) adds the parts of another folder as fillers; their manifest
+quantity is the most that may be used. After all sheets are made, fillers go into the free space of
+each sheet, largest first, each as often as it fits: the sheet's parts stay where they are, the sheet
+does not get longer and no sheet is added. Fillers that find no room are not an error; the report
+says how many were placed.
+
 ## Validation
 
 `validate.rs` checks every sheet with the [geo](https://crates.io/crates/geo) crate, on the
@@ -166,7 +226,7 @@ python3 scripts/sweep_summary.py runs/sweep_<job id>
 ```
 
 Each array task is one run with seed = task id and 3 solver threads; the summary ranks the runs by
-fabric used. `examples/layout_stats.rs` measures an existing hand-made layout the same way:
+fabric consumed and shows panel tilt. `examples/layout_stats.rs` measures an existing hand-made layout the same way:
 
 ```bash
 cargo run --release --example layout_stats -p nest-core -- 1560 0 sheet1.dxf sheet2.dxf
@@ -200,12 +260,9 @@ This project: MIT.
 
 | dependency | license |
 |---|---|
-| sparrow 0.3.0 (master `6f7b9d3`) | MIT |
+| sparrow 0.3.0 (master `6f7b9d3`, vendored with a patch) | MIT |
 | jagua-rs 1.1.0 | MPL-2.0 (used unmodified) |
 | dxf 0.6.2 | MIT |
 | geo 0.33 | MIT OR Apache-2.0 |
 | clap, serde, toml, anyhow, log, env_logger, rand, ctrlc | MIT OR Apache-2.0 |
 | csv | Unlicense OR MIT |
-
-Before publishing, the path dependency on `../sparrow` should become a git dependency pinned to a
-commit, so the repository builds without a sibling checkout.

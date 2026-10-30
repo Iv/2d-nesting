@@ -35,7 +35,33 @@ impl JobOutput {
 
 /// Reads a folder of parts, nests, validates and writes `sheet_N.dxf` and `report.txt` to `out_dir`.
 pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params: &NestParams) -> Result<JobOutput> {
-    let demands = manifest::load_job(input, import)?;
+    run_with_fillers(input, &[], out_dir, import, params)
+}
+
+/// Like [`run`], with filler parts from further folders (small parts of other jobs, quantity = how
+/// many at most) that go into free space of the sheets.
+pub fn run_with_fillers(
+    input: &Path,
+    fillers: &[PathBuf],
+    out_dir: &Path,
+    import: &dxf_in::ImportOptions,
+    params: &NestParams,
+) -> Result<JobOutput> {
+    let mut demands = manifest::load_job(input, import)?;
+    for dir in fillers {
+        for mut d in manifest::load_job(dir, import)? {
+            if demands.iter().any(|o| o.part.name == d.part.name) {
+                anyhow::bail!("filler \"{}\" in {} has the name of another part", d.part.name, dir.display());
+            }
+            d.filler = true;
+            demands.push(d);
+        }
+    }
+    if params.align_panels {
+        for (i, deg) in solver::align_panels(&mut demands, params) {
+            log::info!("{}: turned by {deg:.2}° to lay its long axis along the fabric", demands[i].part.name);
+        }
+    }
     // Intermediate layouts go to `steps/` so a run can be looked through afterwards.
     let steps_dir = out_dir.join("steps");
     fs::create_dir_all(&steps_dir).with_context(|| format!("{}: cannot create directory", steps_dir.display()))?;

@@ -36,6 +36,14 @@ enum StrategyArg {
     Greedy,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelAxis {
+    /// Along the panel's long axis
+    Long,
+    /// Along the drawing's X axis
+    Drawn,
+}
+
 #[derive(Args, Debug)]
 struct ExtractArgs {
     /// Assembly DXF with every part in its own block
@@ -54,6 +62,11 @@ struct ExtractArgs {
 struct RunArgs {
     /// Folder with part DXF files and an optional parts.toml / parts.csv manifest
     input: PathBuf,
+
+    /// Folder of filler parts (e.g. small parts of another job; quantity = at most this many) that
+    /// go into free space of the sheets without making them longer; may be repeated
+    #[arg(long)]
+    fillers: Vec<PathBuf>,
 
     /// Output folder (sheet_N.dxf, report.txt, steps/); default runs/<input name>_<date>_<time>
     #[arg(short, long)]
@@ -82,6 +95,31 @@ struct RunArgs {
     /// Rotation step within the tolerance, degrees
     #[arg(long, default_value_t = 1.0)]
     rotation_step: f64,
+
+    /// Parts whose name contains one of these (comma-separated, case-insensitive) are panels:
+    /// their deviation from a base angle is penalised
+    #[arg(long, default_value = "top,bot", value_delimiter = ',')]
+    panels: Vec<String>,
+
+    /// Panel tilt penalty: a panel turned d degrees off a base angle costs this · d² mm of
+    /// fabric length (0 = no penalty)
+    #[arg(long, default_value_t = 10.0)]
+    tilt_penalty: f64,
+
+    /// Straight direction of a panel: along its long axis (elongated panels are turned before
+    /// nesting) or the drawing's X axis
+    #[arg(long, value_enum, default_value_t = PanelAxis::Long)]
+    panel_axis: PanelAxis,
+
+    /// A free strip along the top of a sheet at least this wide (mm) is reusable and not counted
+    /// as used fabric; sheets with spare length are re-nested to leave one (0 = off)
+    #[arg(long, default_value_t = 150.0)]
+    min_strip: f64,
+
+    /// Fabric saved at the end of a sheet is worth this many times the same area left as a strip
+    /// on top (1 = equally valuable)
+    #[arg(long, default_value_t = 2.0)]
+    strip_ratio: f64,
 
     /// How parts are distributed over sheets
     #[arg(long, value_enum, default_value_t = StrategyArg::Balanced)]
@@ -123,6 +161,10 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     close_gaps: f64,
 
+    /// How far inner geometry (marks, open lines) may stick out of the outer contour, mm
+    #[arg(long, default_value_t = 2.0)]
+    edge_tolerance: f64,
+
     /// Treat any open line as an error, even inside a part
     #[arg(long)]
     strict_open: bool,
@@ -162,6 +204,12 @@ fn extract(args: ExtractArgs) -> Result<()> {
 }
 
 fn run(cli: RunArgs) -> Result<bool> {
+    if !(cli.strip_ratio >= 1.0) {
+        bail!("--strip-ratio must be at least 1");
+    }
+    if !(cli.tilt_penalty >= 0.0) {
+        bail!("--tilt-penalty must not be negative");
+    }
     if !(cli.time_limit > 0.0) {
         bail!("--time-limit must be positive");
     }
@@ -180,6 +228,7 @@ fn run(cli: RunArgs) -> Result<bool> {
         ignore_layers: cli.ignore_layers,
         allow_open_inside: !cli.strict_open,
         close_gaps: cli.close_gaps,
+        edge_tolerance: cli.edge_tolerance,
         ..Default::default()
     };
     let params = NestParams {
@@ -189,6 +238,11 @@ fn run(cli: RunArgs) -> Result<bool> {
         rotations: cli.rotations,
         rotation_tolerance: cli.rotation_tolerance,
         rotation_step: cli.rotation_step,
+        panels: cli.panels,
+        tilt_penalty: cli.tilt_penalty,
+        align_panels: cli.panel_axis == PanelAxis::Long,
+        min_strip: cli.min_strip,
+        strip_ratio: cli.strip_ratio,
         budget: match cli.iterations {
             Some(n) => Budget::Iterations(n),
             None => Budget::Time(Duration::from_secs_f64(cli.time_limit)),
@@ -211,7 +265,7 @@ fn run(cli: RunArgs) -> Result<bool> {
     let command: Vec<String> = std::env::args().collect();
     std::fs::write(out_dir.join("command.txt"), command.join(" ") + "\n")?;
 
-    let out = nest_core::run(&cli.input, &out_dir, &import, &params)?;
+    let out = nest_core::run_with_fillers(&cli.input, &cli.fillers, &out_dir, &import, &params)?;
     println!("{}", out.report);
     for f in &out.sheet_files {
         println!("Wrote {}", f.display());

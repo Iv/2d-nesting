@@ -64,6 +64,7 @@ pub const DEFAULT_SPARROW_CONFIG: SparrowConfig = SparrowConfig {
                 n_container_samples: 50,
                 n_focussed_samples: 25,
                 n_coord_descents: 3,
+                tilt: None,
             },
         },
         large_item_ch_area_cutoff_percentile: 0.75
@@ -81,6 +82,7 @@ pub const DEFAULT_SPARROW_CONFIG: SparrowConfig = SparrowConfig {
                 n_container_samples: 50,
                 n_focussed_samples: 25,
                 n_coord_descents: 3,
+                tilt: None,
             },
         },
     },

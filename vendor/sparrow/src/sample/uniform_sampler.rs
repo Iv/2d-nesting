@@ -17,6 +17,8 @@ const ROT_N_SAMPLES: usize = 16; // number of rotations to sample for continuous
 pub struct UniformBBoxSampler {
     /// The list of possible rotations and their corresponding x and y ranges
     rot_entries: Vec<RotEntry>,
+    /// Indices into `rot_entries` of the rotations without tilt penalty (empty if the item has none).
+    straight: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +29,8 @@ struct RotEntry {
 }
 
 impl UniformBBoxSampler {
-    pub fn new(sample_bbox: Rect, item: &Item, container_bbox: Rect) -> Option<Self> {
+    /// With a tilt table (`(rotation, penalty)`), half of the samples are taken at zero-penalty rotations.
+    pub fn new(sample_bbox: Rect, item: &Item, container_bbox: Rect, tilt: Option<&[(f32, f32)]>) -> Option<Self> {
         let rotations = match item.allowed_orientations().rotations() {
             RotationRange::None => &vec![0.0],
             RotationRange::Discrete(r) => r,
@@ -64,13 +67,25 @@ impl UniformBBoxSampler {
 
         match rot_entries.is_empty() {
             true => None,
-            false => Some(Self { rot_entries }),
+            false => {
+                let straight = match tilt {
+                    Some(t) => rot_entries.iter().enumerate()
+                        .filter(|(_, e)| t.iter().any(|&(r, p)| p == 0.0 && normalize_rotation(e.r - r).abs() < 1e-4))
+                        .map(|(i, _)| i)
+                        .collect(),
+                    None => vec![],
+                };
+                Some(Self { rot_entries, straight })
+            }
         }
     }
 
     pub fn sample(&self, rng: &mut impl Rng) -> DTransformation {
         // randomly select a rotation
-        let r_entry = self.rot_entries.choose(rng).unwrap();
+        let r_entry = match self.straight.is_empty() || rng.random_bool(0.5) {
+            true => self.rot_entries.choose(rng).unwrap(),
+            false => &self.rot_entries[*self.straight.choose(rng).unwrap()],
+        };
 
         // sample a random x and y value within the valid range
         let r = r_entry.r;

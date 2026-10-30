@@ -123,6 +123,7 @@ mod tests {
         Demand {
             part: Part { name: "sq".into(), source: "sq.dxf".into(), shape: Shape::new(outer, vec![]) },
             qty: 2,
+            filler: false,
         }
     }
 

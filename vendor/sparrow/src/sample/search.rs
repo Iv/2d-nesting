@@ -2,6 +2,7 @@ use crate::consts::{PRE_REFINE_CD_R_STEPS, PRE_REFINE_CD_TL_RATIOS, SND_REFINE_C
 use crate::eval::sample_eval::{SampleEval, SampleEvaluator};
 use crate::sample::best_samples::BestSamples;
 use crate::sample::coord_descent::{refine_coord_desc, CDConfig};
+use crate::sample::tilt::{TiltEvaluator, TiltPenalty};
 use crate::sample::uniform_sampler::UniformBBoxSampler;
 use jagua_rs::entities::{Item, Layout, PItemKey};
 use jagua_rs::geometry::geo_enums::RotationRange;
@@ -14,10 +15,20 @@ pub struct SampleConfig {
     pub n_container_samples: usize,
     pub n_focussed_samples: usize,
     pub n_coord_descents: usize,
+    /// Optional rotation penalty per item (see [`TiltPenalty`]); `None` keeps upstream behaviour.
+    pub tilt: Option<&'static TiltPenalty>,
 }
 
 /// Algorithm 6 and Figure 7 from https://doi.org/10.48550/arXiv.2509.13329
-pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng) -> (Option<(DTransformation, SampleEval)>, usize) {
+pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng) -> (Option<(DTransformation, SampleEval)>, usize) {
+    match sample_config.tilt.filter(|t| t.table(item).is_some()) {
+        Some(tilt) => search_placement_with(l, item, ref_pk, TiltEvaluator { inner: evaluator, tilt, item }, sample_config, rng),
+        None => search_placement_with(l, item, ref_pk, evaluator, sample_config, rng),
+    }
+}
+
+fn search_placement_with(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut evaluator: impl SampleEvaluator, sample_config: SampleConfig, rng: &mut impl Rng) -> (Option<(DTransformation, SampleEval)>, usize) {
+    let tilt = sample_config.tilt.and_then(|t| t.table(item));
     let item_min_dim = f32::min(item.shape_cd().bbox().width(), item.shape_cd().bbox().height());
 
     let mut best_samples = BestSamples::new(sample_config.n_coord_descents, item_min_dim * UNIQUE_SAMPLE_THRESHOLD);
@@ -34,11 +45,11 @@ pub fn search_placement(l: &Layout, item: &Item, ref_pk: Option<PItemKey>, mut e
 
             //Create a uniform sampler focussed around the current placement
             let pi_bbox = l.placed_items()[ref_pk].shape().bbox();
-            UniformBBoxSampler::new(pi_bbox, item, l.container().outer_cd().bbox())
+            UniformBBoxSampler::new(pi_bbox, item, l.container().outer_cd().bbox(), tilt)
         }
         None => None,
     };
-    let container_sampler = UniformBBoxSampler::new(l.container().outer_cd().bbox(), item, l.container().outer_cd().bbox());
+    let container_sampler = UniformBBoxSampler::new(l.container().outer_cd().bbox(), item, l.container().outer_cd().bbox(), tilt);
 
     //Perform the focussed sampling
     if let Some(focussed_sampler) = focussed_sampler {

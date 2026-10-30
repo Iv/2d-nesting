@@ -4,6 +4,7 @@ use crate::optimizer::compress::compression_phase;
 use crate::optimizer::explore::exploration_phase;
 use crate::optimizer::lbf::LBFBuilder;
 use crate::optimizer::separator::Separator;
+use crate::sample::search::SampleConfig;
 use crate::util::listener::{OptimizationPhase, ReportType, SolutionListener};
 use crate::util::terminator::Terminator;
 use jagua_rs::geometry::geo_enums::RotationRange;
@@ -39,7 +40,7 @@ pub fn optimize(
     // First build an initial solution if none is provided
     let start_prob = match initial_solution {
         None => {
-            let builder = LBFBuilder::new(instance, next_rng(), LBF_SAMPLE_CONFIG)?.construct()?;
+            let builder = LBFBuilder::new(instance, next_rng(), SampleConfig { tilt: expl_config.separator_config.sample_config.tilt, ..LBF_SAMPLE_CONFIG })?.construct()?;
             builder.prob
         }
         Some(init_sol) => {
