@@ -54,8 +54,8 @@ fn full_run_with_gap_is_valid() {
 
     // Area lower bound and a sane upper bound.
     let area: f64 = sheet.placements.iter().map(|pl| job.demands[pl.part].part.shape.area()).sum();
-    assert!(sheet.length >= area / sheet.width);
-    assert!(sheet.length < 2.0 * area / sheet.width + 500.0, "length {}", sheet.length);
+    assert!(sheet.used_length >= area / sheet.width);
+    assert!(sheet.used_length < 2.0 * area / sheet.width + 500.0, "length {}", sheet.used_length);
 
     // Only 0° or 180°.
     assert!(sheet.placements.iter().all(|pl| [0.0, 180.0].contains(&pl.transform.rotation_deg)));

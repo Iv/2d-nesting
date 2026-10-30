@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn detects_overlap_gap_and_bounds() {
         let d = [square(10.0)];
-        let sheet = |ps| Sheet { width: 100.0, length: 100.0, placements: ps };
+        let sheet = |ps| Sheet { width: 100.0, length: 100.0, used_length: 100.0, placements: ps };
         assert!(validate_sheet(&d, &sheet(vec![at(0.0, 0.0), at(12.0, 0.0)]), 2.0).ok());
         let v = validate_sheet(&d, &sheet(vec![at(0.0, 0.0), at(11.0, 0.0)]), 2.0);
         assert!(matches!(v.violations[..], [Violation::Gap { .. }]));
