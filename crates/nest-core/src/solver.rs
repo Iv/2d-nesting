@@ -194,6 +194,9 @@ impl NestParams {
 
 /// A sheet is not expected to be packed denser than this, which bounds the probes worth trying.
 const MAX_DENSITY: f64 = 0.92;
+/// Density used to estimate the sheet count, how much to move out of an overfull sheet and the
+/// length a part takes up on some sheet.
+const TARGET_DENSITY: f64 = 0.85;
 /// A draft gets this fraction (1/n) of the per-sheet budget, see [`NestParams::drafts`].
 const DRAFT_SHARE: u32 = 10;
 
@@ -399,14 +402,17 @@ fn make_sheets(
     let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
+    // A probe that adds part `c` is kept only if the sheet grows by no more than the part would take
+    // up elsewhere: squeezing a part onto a sheet at the cost of a much longer sheet wastes fabric.
+    let worth = |c: usize, before: &[Placement], after: &[Placement]| {
+        fits(after) && len_of(after) - len_of(before) <= area(c) / (params.width * TARGET_DENSITY) + eps
+    };
     // Fillers are kept out until all sheets are made.
     let mut remaining: Vec<usize> =
         (0..demands.len()).map(|i| if prep.items[i].is_some() && !demands[i].filler { demands[i].qty } else { 0 }).collect();
     let mut sheets: Vec<Sheet> = Vec::new();
 
     if params.strategy == Strategy::Balanced {
-        /// Density used to estimate the sheet count and how much to move out of an overfull sheet.
-        const TARGET_DENSITY: f64 = 0.85;
         const MAX_REPAIRS: usize = 4;
         let (w, l) = (params.width, params.length);
         let total: f64 = (0..demands.len()).map(|i| remaining[i] as f64 * area(i)).sum();
@@ -482,7 +488,7 @@ fn make_sheets(
                 probes += 1;
                 let trial = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
                 report(sheet_no, format!("probe +{}", demands[c].part.name), &trial);
-                if fits(&trial) {
+                if worth(c, &pl, &trial) {
                     overflow[c] -= 1;
                     free -= area(c);
                     pl = trial;
@@ -538,7 +544,7 @@ fn make_sheets(
             probes += 1;
             let trial = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
             report(sheet_no, format!("probe +{}", demands[c].part.name), &trial);
-            if fits(&trial) {
+            if worth(c, &chosen, &trial) {
                 free -= area(c);
                 chosen = trial;
                 // Try the same part again: identical copies often pair up well.
