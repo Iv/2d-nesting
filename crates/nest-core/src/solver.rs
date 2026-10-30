@@ -21,6 +21,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How parts are distributed over sheets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// Deal parts over the estimated number of sheets up front (long and short parts mixed on
+    /// every sheet), then repair overfull sheets and fill gaps from the overflow.
+    Balanced,
+    /// Fill one sheet at a time from a strip of all remaining parts.
+    Greedy,
+}
+
 /// When to stop the search.
 #[derive(Debug, Clone, Copy)]
 pub enum Budget {
@@ -45,6 +55,7 @@ pub struct NestParams {
     /// Step of the deviation around each base angle, degrees.
     pub rotation_step: f64,
     pub budget: Budget,
+    pub strategy: Strategy,
     pub seed: Option<u64>,
     /// Number of sparrow separator workers.
     pub workers: usize,
@@ -62,6 +73,7 @@ impl Default for NestParams {
             rotation_tolerance: 0.0,
             rotation_step: 1.0,
             budget: Budget::Time(Duration::from_secs(60)),
+            strategy: Strategy::Balanced,
             seed: None,
             workers: DEFAULT_SPARROW_CONFIG.expl_cfg.separator_config.n_workers,
             cancel: None,
@@ -127,7 +139,10 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
 
 /// Nests the demands onto fixed-size sheets, reporting every intermediate layout to `observer`.
 ///
-/// sparrow only solves strip packing, so sheets are filled one at a time on top of it:
+/// With [`Strategy::Balanced`] parts are first dealt over the estimated sheet count (see the code);
+/// whatever does not fit then goes through the greedy loop below.
+///
+/// sparrow only solves strip packing, so the greedy loop fills sheets one at a time on top of it:
 /// 1. all remaining parts are nested into a strip of the sheet width; if the strip is no longer
 ///    than the sheet, it is the last sheet;
 /// 2. otherwise the parts lying entirely within the sheet length form a valid starting sheet;
@@ -174,6 +189,104 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let mut report = |sheet: usize, kind: String, pl: &[Placement]| {
         observer(&Step { sheet, kind, placements: pl.to_vec(), used_length: len_of(pl), fits: fits(pl) });
     };
+
+    if params.strategy == Strategy::Balanced {
+        /// Density used to estimate the sheet count and how much to move out of an overfull sheet.
+        const TARGET_DENSITY: f64 = 0.85;
+        const MAX_REPAIRS: usize = 4;
+        let (w, l) = (params.width, params.length);
+        let total: f64 = (0..demands.len()).map(|i| remaining[i] as f64 * area(i)).sum();
+        let n_sheets = ((total / (TARGET_DENSITY * w * l)).ceil() as usize).max(1);
+
+        // Long parts (ribs) and short ones (fillers) are dealt separately, each in serpentine order
+        // 1..N, N..1, ..., largest first: every sheet gets long and short ribs that pair up along
+        // the sheet, plus its share of small parts.
+        let long = |i: usize| {
+            let b = demands[i].part.shape.bbox();
+            b.width().max(b.height()) > 0.25 * l
+        };
+        let mut copies: Vec<usize> = (0..demands.len()).flat_map(|i| std::iter::repeat_n(i, remaining[i])).collect();
+        copies.sort_by(|&a, &b| area(b).total_cmp(&area(a)));
+        let mut batches = vec![vec![0usize; demands.len()]; n_sheets];
+        for class in [true, false] {
+            for (k, &c) in copies.iter().filter(|&&c| long(c) == class).enumerate() {
+                let round = k / n_sheets;
+                let pos = k % n_sheets;
+                let b = if round % 2 == 0 { pos } else { n_sheets - 1 - pos };
+                batches[b][c] += 1;
+            }
+        }
+        info!("balanced plan: {n_sheets} sheets for {} parts", copies.len());
+
+        let mut overflow = vec![0usize; demands.len()];
+        for mut counts in batches {
+            let sheet_no = sheets.len() + 1;
+            let mut pl = prep.strip(&counts, params, params.budget.share(1, 4), next_seed())?;
+            report(sheet_no, "batch".into(), &pl);
+            let mut repairs = 0;
+            while !fits(&pl) && repairs < MAX_REPAIRS {
+                repairs += 1;
+                // Move out parts reaching past the sheet end, smallest first, about as much area as sticks out.
+                let excess = (len_of(&pl) - l) * w * TARGET_DENSITY;
+                let mut crossing: Vec<usize> = pl.iter().filter(|p| bbox(p).max.x > l + eps).map(|p| p.part).collect();
+                crossing.sort_by(|&a, &b| area(a).total_cmp(&area(b)));
+                let mut moved = 0.0;
+                for c in crossing {
+                    if moved > 0.0 && moved >= excess {
+                        break;
+                    }
+                    counts[c] -= 1;
+                    overflow[c] += 1;
+                    moved += area(c);
+                }
+                pl = prep.strip(&counts, params, params.budget.share(1, 4), next_seed())?;
+                report(sheet_no, format!("repair{repairs}"), &pl);
+            }
+            if !fits(&pl) {
+                // Still too long: keep what lies inside the sheet, the rest joins the overflow.
+                let (inside, out): (Vec<Placement>, Vec<Placement>) = pl.into_iter().partition(|p| bbox(p).max.x <= l + eps);
+                for p in out {
+                    counts[p.part] -= 1;
+                    overflow[p.part] += 1;
+                }
+                pl = inside;
+                report(sheet_no, "cut".into(), &pl);
+            }
+
+            // Fill the free area with parts that earlier sheets could not take, largest first.
+            let mut free = MAX_DENSITY * w * l - pl.iter().map(|p| area(p.part)).sum::<f64>();
+            let mut candidates: Vec<usize> = (0..demands.len()).filter(|&i| overflow[i] > 0).collect();
+            candidates.sort_by(|&a, &b| area(b).total_cmp(&area(a)));
+            let (mut probes, mut i) = (0, 0);
+            while probes < MAX_PROBES && i < candidates.len() {
+                let c = candidates[i];
+                if overflow[c] == 0 || area(c) > free {
+                    i += 1;
+                    continue;
+                }
+                counts[c] += 1;
+                probes += 1;
+                let trial = prep.strip(&counts, params, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
+                report(sheet_no, format!("probe +{}", demands[c].part.name), &trial);
+                if fits(&trial) {
+                    overflow[c] -= 1;
+                    free -= area(c);
+                    pl = trial;
+                } else {
+                    counts[c] -= 1;
+                    i += 1;
+                }
+            }
+
+            for p in &pl {
+                remaining[p.part] -= 1;
+            }
+            info!("sheet {sheet_no}: {} parts, used length {:.1} mm, {} in overflow", pl.len(), len_of(&pl), overflow.iter().sum::<usize>());
+            report(sheet_no, "sheet".into(), &pl);
+            sheets.push(Sheet { width: w, length: l, used_length: len_of(&pl), placements: pl });
+        }
+        // `remaining` is now exactly the overflow; the loop below puts it on further sheets.
+    }
 
     while remaining.iter().sum::<usize>() > 0 {
         let sheet_no = sheets.len() + 1;

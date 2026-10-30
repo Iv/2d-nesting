@@ -10,7 +10,7 @@ fn main() {
     let b = nest_core::geom::BBox::of(all);
     let k = 1600.0 / (b.width() + 20.0);
     let h = (b.height() + 20.0) * k;
-    let mut s = format!("<svg xmlns='http://www.w3.org/2000/svg' width='1600' height='{h:.0}'><rect width='100%' height='100%' fill='white'/><g fill='none' stroke-width='1.5'>");
+    let mut s = format!("<svg xmlns='http://www.w3.org/2000/svg' width='1600' height='{h:.0}' viewBox='0 0 1600 {h:.0}'><rect width='100%' height='100%' fill='white'/><g fill='none' stroke-width='1.5'>");
     let path = |pts: &[nest_core::geom::Pt], close: bool| {
         let mut p = String::new();
         for (i, q) in pts.iter().enumerate() { p += &format!("{}{:.2},{:.2} ", if i == 0 { "M" } else { "L" }, (q.x - b.min.x + 10.0) * k, h - (q.y - b.min.y + 10.0) * k); }

@@ -28,6 +28,14 @@ enum Cmd {
     Extract(ExtractArgs),
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum StrategyArg {
+    /// Deal parts over all sheets up front, then repair and fill
+    Balanced,
+    /// Fill one sheet at a time from a strip of all remaining parts
+    Greedy,
+}
+
 #[derive(Args, Debug)]
 struct ExtractArgs {
     /// Assembly DXF with every part in its own block
@@ -74,6 +82,10 @@ struct RunArgs {
     /// Rotation step within the tolerance, degrees
     #[arg(long, default_value_t = 1.0)]
     rotation_step: f64,
+
+    /// How parts are distributed over sheets
+    #[arg(long, value_enum, default_value_t = StrategyArg::Balanced)]
+    strategy: StrategyArg,
 
     /// Search time per sheet, seconds
     #[arg(short, long, default_value_t = 60.0, conflicts_with = "iterations")]
@@ -180,6 +192,10 @@ fn run(cli: RunArgs) -> Result<bool> {
         budget: match cli.iterations {
             Some(n) => Budget::Iterations(n),
             None => Budget::Time(Duration::from_secs_f64(cli.time_limit)),
+        },
+        strategy: match cli.strategy {
+            StrategyArg::Balanced => nest_core::solver::Strategy::Balanced,
+            StrategyArg::Greedy => nest_core::solver::Strategy::Greedy,
         },
         seed: cli.seed,
         workers: cli.workers,
