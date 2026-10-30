@@ -2,6 +2,7 @@
 //!
 //! All logic lives here; the CLI (and a future GUI) only collect parameters and call [`run`].
 
+pub mod compact;
 pub mod dxf_in;
 pub mod dxf_out;
 pub mod extract;

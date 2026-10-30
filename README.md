@@ -213,6 +213,13 @@ When all sheets are made, every sheet with spare length is nested again into nar
 "Fabric consumed"; `sweep_summary.py` ranks runs by it. The report also shows the free area at the
 right end per sheet.
 
+### Final compaction
+
+The solver only shortens the strip, so it has no reason to close a hole that does not make the
+sheet shorter. When the sheets are made, every part slides left, then down, as far as the sheet
+edges and the other parts (at the gap) allow, a few rounds, on the exact geometry. Free space gathers
+at the right end and along the top, where it counts as reusable; the sheet never gets longer.
+
 ### Fillers
 
 `--fillers <dir>` (may be repeated) adds the parts of another folder as fillers; their manifest

@@ -416,6 +416,17 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         }
     }
 
+    // Parts slide left and down on the exact geometry, closing holes the solver had no reason to
+    // close: the free space moves to the right end and the top, where it counts as reusable.
+    for (n, sheet) in sheets.iter_mut().enumerate() {
+        let mut pl = sheet.placements.clone();
+        if crate::compact::slide(demands, &mut pl, params.gap) && sheet_cost(&pl) <= sheet_cost(&sheet.placements) + eps {
+            sheet.used_length = len_of(&pl);
+            sheet.placements = pl;
+            report(n + 1, "slide".into(), &sheet.placements);
+        }
+    }
+
     // Fillers go into the free space of the finished sheets, which stay as they are.
     let mut fillers: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() && demands[i].filler { demands[i].qty } else { 0 }).collect();
     for (n, sheet) in sheets.iter_mut().enumerate() {

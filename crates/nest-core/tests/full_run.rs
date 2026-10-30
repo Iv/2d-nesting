@@ -74,7 +74,7 @@ fn same_seed_and_iterations_give_same_layout() {
     let run = |seed| {
         let out = tempfile::tempdir().unwrap();
         let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(0.0, vec![0.0, 180.0], seed)).unwrap();
-        assert!(job.valid());
+        assert!(job.valid(), "{}", job.report);
         job.outcome.result.sheets[0]
             .placements
             .iter()
@@ -184,7 +184,7 @@ fn parts_are_inserted_as_their_source_drawings() {
     let out = tempfile::tempdir().unwrap();
     let p = NestParams { rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 3) };
     let job = nest_core::run(dir.path(), out.path(), &ImportOptions::default(), &p).unwrap();
-    assert!(job.valid());
+    assert!(job.valid(), "{}", job.report);
     assert!(job.demands.iter().all(|d| d.part.drawn.rotation_deg.abs() > 6.9), "panels are aligned");
 
     let mut inserted = 0;
@@ -226,7 +226,7 @@ fn panels_are_kept_straight() {
     let input = panel_job();
     let out = tempfile::tempdir().unwrap();
     let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
-    assert!(job.valid());
+    assert!(job.valid(), "{}", job.report);
     let sheets = &job.outcome.result.sheets;
     let panels: Vec<f64> = sheets
         .iter()
@@ -271,7 +271,7 @@ fn panel_tilt_is_limited() {
     let input = panel_job();
     let out = tempfile::tempdir().unwrap();
     let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
-    assert!(job.valid());
+    assert!(job.valid(), "{}", job.report);
     for pl in job.outcome.result.sheets.iter().flat_map(|s| &s.placements) {
         let name = &job.demands[pl.part].part.name;
         assert!(!p.is_panel(name) || p.tilt(pl.transform.rotation_deg) <= 2.0 + 1e-6, "{name} at {}°", pl.transform.rotation_deg);
