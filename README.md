@@ -36,7 +36,7 @@ nest extract JUMBO5_38.dxf --blocks 'rib*' --out ribs
 nest run ribs --out out --layers 0 --gap 3 --rotation-tolerance 10 --rotation-step 2 --time-limit 20 --seed 1
 ```
 
-Output in `out/`:
+Output in `runs/<input>_<date>_<time>/` (or `--out`):
 
 | file | content |
 |---|---|
@@ -44,6 +44,8 @@ Output in `out/`:
 | `sheet_N.svg` | preview of the sheet |
 | `index.html` | all previews on one page |
 | `report.txt` | the report that is also printed to the console |
+| `steps/` | SVG of every intermediate layout (strip, repairs, probes, final sheet) |
+| `command.txt` | the command line of the run |
 
 The exit code is 0 on success, 2 if the independent validation found a violation, 1 on errors.
 
@@ -95,6 +97,7 @@ A part missing from the manifest gets quantity 1 (with a warning); quantity 0 le
 | `-r, --rotations` | 0,90,180,270 | base rotation angles, degrees; `0` disables rotation |
 | `--rotation-tolerance` | 0 | each base angle ± this, degrees |
 | `--rotation-step` | 1 | step within the tolerance, degrees |
+| `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
 | `-t, --time-limit` | 60 | search time per sheet, s |
 | `-i, --iterations` | – | iteration budget per sheet instead of time (reproducible) |
 | `-s, --seed` | random | random seed (printed in the report) |
@@ -105,7 +108,7 @@ A part missing from the manifest gets quantity 1 (with a warning); quantity 0 le
 | `--layers` | all | read only these layers |
 | `--ignore-layers` | – | skip these layers |
 | `--strict-open` | off | any open line is an error, even inside a part |
-| `-o, --out` | out | output folder |
+| `-o, --out` | `runs/<input>_<date>_<time>` | output folder |
 | `-v` | – | progress output (`-vv` for solver debug output) |
 
 `nest extract <assembly.dxf> --blocks <patterns> --out <dir>` saves every block whose name matches
@@ -115,16 +118,28 @@ and the insert count of each block as a comment.
 ## How sheets are filled
 
 sparrow solves strip packing: a strip of fixed width whose length it minimises. Sheets are filled on
-top of that:
+top of that. A sheet need not be filled to its full length, but it is always compacted so its right
+edge is straight: fabric beyond a straight cut is reusable and is not counted as waste. The report's
+utilisation is parts area / (sheet width × sum of the used lengths).
 
-1. All remaining parts are nested into a strip of the sheet width.
-2. If the strip fits in the sheet length, it is the last sheet.
-3. Otherwise the parts lying entirely within the sheet length make a valid sheet. The parts that
-   cross the sheet end are offered to that sheet as well; a second, shorter run keeps them if the
-   whole set still fits.
-4. The rest goes on to the next sheet.
+`--strategy balanced` (default):
 
-Each sheet gets `--time-limit` (two thirds for the first run, one third for the second).
+1. The sheet count is estimated from the total area.
+2. Parts are dealt over the sheets in serpentine order (1..N, N..1, …), largest first, long parts
+   and short parts separately. Every sheet gets long and short pieces that pair up along its length
+   (ribs nose to tail) plus its share of small parts.
+3. Each sheet is nested. If it is too long, the parts reaching past the sheet end are moved to an
+   overflow pool and the sheet is nested again. Free area is then filled with overflow parts.
+4. Whatever is left goes through the greedy loop below.
+
+`--strategy greedy`:
+
+1. All remaining parts are nested into a strip of the sheet width; if it fits, it is the last sheet.
+2. Otherwise the parts lying entirely within the sheet length make a starting sheet, which is grown
+   by adding remaining parts one at a time (largest first) while a short run still fits.
+3. The sheet is compacted and the rest goes on to the next sheet.
+
+`--time-limit` is the budget per sheet, shared by the runs for that sheet.
 Parts that fit the sheet at no allowed angle are reported as unplaced.
 
 ## Validation
@@ -139,6 +154,23 @@ arithmetic). The result is in the report.
 With `--time-limit` the search stops on the clock, so two runs with the same seed can differ.
 With `--seed N --iterations K` (and the same `--workers`) the search stops after a fixed number of
 steps and the clock is not used anywhere, so the layout is identical every time.
+
+## Seed sweeps on a slurm cluster
+
+Results depend on the seed, so many seeds in parallel and the best layout of them is a cheap win.
+
+```bash
+mkdir -p runs/slurm
+sbatch --array=1-64 scripts/slurm/sweep.sbatch <input dir> --layers 0 -g 3 -t 20
+python3 scripts/sweep_summary.py runs/sweep_<job id>
+```
+
+Each array task is one run with seed = task id and 3 solver threads; the summary ranks the runs by
+fabric used. `examples/layout_stats.rs` measures an existing hand-made layout the same way:
+
+```bash
+cargo run --release --example layout_stats -p nest-core -- 1560 0 sheet1.dxf sheet2.dxf
+```
 
 ## Tests
 
