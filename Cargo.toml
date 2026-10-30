@@ -30,6 +30,15 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-# sparrow is float-heavy; keep tests usable
+# sparrow тяжёлый по вычислениям: тесты в оптимизированной сборке.
 [profile.test]
 opt-level = 3
+
+# Отладочные проверки sparrow очень дорогие (сверка трекера после каждого хода), и одна из них
+# (`weighted loss should never increase`, worker.rs) срабатывает на длинных смешанных прогонах.
+# Корректность раскладки подтверждает наша независимая проверка (validate.rs).
+[profile.test.package.sparrow]
+debug-assertions = false
+
+[profile.test.package.jagua-rs]
+debug-assertions = false
