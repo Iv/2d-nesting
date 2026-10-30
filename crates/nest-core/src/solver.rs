@@ -190,7 +190,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         observer(&Step { sheet, kind, placements: pl.to_vec(), used_length: len_of(pl), fits: fits(pl) });
     };
 
-    if params.strategy == Strategy::Balanced {
+    if params.strategy == Strategy::Balanced && remaining.iter().sum::<usize>() > 0 {
         /// Density used to estimate the sheet count and how much to move out of an overfull sheet.
         const TARGET_DENSITY: f64 = 0.85;
         const MAX_REPAIRS: usize = 4;
