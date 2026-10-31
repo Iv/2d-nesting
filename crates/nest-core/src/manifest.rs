@@ -5,11 +5,14 @@
 //! [parts]
 //! front = 2
 //! sleeve = { qty = 4 }
+//! top5 = { qty = 1, left = 1 }   # one as drawn (right) and one mirrored (left)
 //! ```
-//! `parts.csv`: rows `name,qty`; the first row may be a header.
+//! `parts.csv`: rows `name,qty[,left]`; the first row may be a header.
+//!
+//! Parts are drawn as right-hand ones; `left` copies are mirrored and named `<name>_L`.
 
 use crate::dxf_in::{read_part, ImportOptions};
-use crate::geom::Demand;
+use crate::geom::{Demand, Drawn, Part};
 use anyhow::{bail, Context, Result};
 use log::warn;
 use serde::Deserialize;
@@ -28,11 +31,30 @@ struct TomlManifest {
 #[serde(untagged)]
 enum TomlQty {
     Plain(usize),
-    Table { qty: usize },
+    Table(TomlTable),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TomlTable {
+    #[serde(default, alias = "right")]
+    qty: usize,
+    #[serde(default)]
+    left: usize,
+}
+
+/// How many copies of a part are needed: as drawn (right-hand) and mirrored (left-hand).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Qty {
+    pub right: usize,
+    pub left: usize,
 }
 
 /// Quantity by part name.
-pub type Quantities = BTreeMap<String, usize>;
+pub type Quantities = BTreeMap<String, Qty>;
+
+/// Suffix of the mirrored (left-hand) copy of a part.
+pub const LEFT_SUFFIX: &str = "_L";
 
 pub fn read_manifest(path: &Path) -> Result<Quantities> {
     let text = fs::read_to_string(path).with_context(|| format!("{}: cannot read", path.display()))?;
@@ -51,7 +73,8 @@ fn parse_toml(text: &str) -> Result<Quantities> {
         .into_iter()
         .map(|(k, v)| {
             let q = match v {
-                TomlQty::Plain(q) | TomlQty::Table { qty: q } => q,
+                TomlQty::Plain(q) => Qty { right: q, left: 0 },
+                TomlQty::Table(t) => Qty { right: t.qty, left: t.left },
             };
             (k, q)
         })
@@ -71,15 +94,19 @@ fn parse_csv(text: &str) -> Result<Quantities> {
         if rec.iter().all(str::is_empty) {
             continue;
         }
-        let (name, qty) = (rec.get(0).unwrap_or(""), rec.get(1).unwrap_or(""));
-        match qty.parse::<usize>() {
-            Ok(q) => {
-                if out.insert(name.to_string(), q).is_some() {
+        let (name, qty, left) = (rec.get(0).unwrap_or(""), rec.get(1).unwrap_or(""), rec.get(2).unwrap_or(""));
+        let left = match left {
+            "" => Some(0),
+            l => l.parse::<usize>().ok(),
+        };
+        match (qty.parse::<usize>(), left) {
+            (Ok(right), Some(left)) => {
+                if out.insert(name.to_string(), Qty { right, left }).is_some() {
                     bail!("line {}: part \"{name}\" is listed twice", i + 1);
                 }
             }
-            Err(_) if i == 0 => {} // header
-            Err(_) => bail!("line {}: quantity \"{qty}\" is not a number", i + 1),
+            _ if i == 0 => {} // header
+            _ => bail!("line {}: quantity \"{qty}\" or \"{}\" is not a number", i + 1, rec.get(2).unwrap_or("")),
         }
     }
     Ok(out)
@@ -113,14 +140,25 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
         match read_part(&f, opts) {
             Ok(part) => {
                 let qty = match qtys.as_mut() {
-                    None => 1,
+                    None => Qty { right: 1, left: 0 },
                     Some(q) => q.remove(&part.name).unwrap_or_else(|| {
                         warn!("part \"{}\" is not in the manifest, quantity = 1", part.name);
-                        1
+                        Qty { right: 1, left: 0 }
                     }),
                 };
-                if qty > 0 {
-                    demands.push(Demand { part, qty });
+                if qty.left > 0 {
+                    let left = Part {
+                        name: format!("{}{LEFT_SUFFIX}", part.name),
+                        source: part.source.clone(),
+                        shape: part.shape.mirrored(),
+                        drawn: Drawn { mirrored: !part.drawn.mirrored, rotation_deg: -part.drawn.rotation_deg, ..part.drawn },
+                    };
+                    if qty.right > 0 {
+                        demands.push(Demand { part, qty: qty.right, filler: false });
+                    }
+                    demands.push(Demand { part: left, qty: qty.left, filler: false });
+                } else if qty.right > 0 {
+                    demands.push(Demand { part, qty: qty.right, filler: false });
                 }
             }
             Err(e) => {
@@ -140,6 +178,11 @@ pub fn load_job(dir: &Path, opts: &ImportOptions) -> Result<Vec<Demand>> {
             q.keys().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
+    for (i, d) in demands.iter().enumerate() {
+        if demands[..i].iter().any(|o| o.part.name == d.part.name) {
+            errors.push(format!("part name \"{}\" is used twice (a mirrored copy is named <name>{LEFT_SUFFIX})", d.part.name));
+        }
+    }
     if !errors.is_empty() {
         bail!("input errors:\n  {}", errors.join("\n  "));
     }
@@ -153,15 +196,28 @@ mod tests {
     #[test]
     fn toml_both_forms() {
         let q = parse_toml("[parts]\nfront = 2\nsleeve = { qty = 4 }\n").unwrap();
-        assert_eq!(q["front"], 2);
-        assert_eq!(q["sleeve"], 4);
+        assert_eq!(q["front"], Qty { right: 2, left: 0 });
+        assert_eq!(q["sleeve"], Qty { right: 4, left: 0 });
+    }
+
+    #[test]
+    fn toml_left_copies() {
+        let q = parse_toml("[parts]\ntop5 = { qty = 1, left = 1 }\nbot5 = { right = 2, left = 3 }\nbot6 = { left = 1 }\n").unwrap();
+        assert_eq!(q["top5"], Qty { right: 1, left: 1 });
+        assert_eq!(q["bot5"], Qty { right: 2, left: 3 });
+        assert_eq!(q["bot6"], Qty { right: 0, left: 1 });
+        assert!(parse_toml("[parts]\ntop5 = { qty = 1, lefts = 1 }\n").is_err());
     }
 
     #[test]
     fn csv_with_header_and_comments() {
         let q = parse_csv("name,qty\n# comment\nfront, 2\nback,1\n").unwrap();
         assert_eq!(q.len(), 2);
-        assert_eq!(q["front"], 2);
+        assert_eq!(q["front"], Qty { right: 2, left: 0 });
+        let q = parse_csv("name,qty,left\ntop5,1,1\ntop6,2\n").unwrap();
+        assert_eq!(q["top5"], Qty { right: 1, left: 1 });
+        assert_eq!(q["top6"], Qty { right: 2, left: 0 });
         assert!(parse_csv("a,1\nb,x\n").is_err());
+        assert!(parse_csv("a,1\nb,1,x\n").is_err());
     }
 }

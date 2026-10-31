@@ -2,6 +2,7 @@
 //!
 //! All logic lives here; the CLI (and a future GUI) only collect parameters and call [`run`].
 
+pub mod compact;
 pub mod dxf_in;
 pub mod dxf_out;
 pub mod extract;
@@ -34,14 +35,35 @@ impl JobOutput {
 }
 
 /// Reads a folder of parts, nests, validates and writes `sheet_N.dxf` and `report.txt` to `out_dir`.
-pub fn run(
+pub fn run(input: &Path, out_dir: &Path, import: &dxf_in::ImportOptions, params: &NestParams) -> Result<JobOutput> {
+    run_with_fillers(input, &[], out_dir, import, params, &dxf_out::OutputOptions::default())
+}
+
+/// Like [`run`], with filler parts from further folders (small parts of other jobs, quantity = how
+/// many at most) that go into free space of the sheets.
+pub fn run_with_fillers(
     input: &Path,
+    fillers: &[PathBuf],
     out_dir: &Path,
     import: &dxf_in::ImportOptions,
     params: &NestParams,
-    dxf_opts: dxf_out::DxfOptions,
+    output: &dxf_out::OutputOptions,
 ) -> Result<JobOutput> {
-    let demands = manifest::load_job(input, import)?;
+    let mut demands = manifest::load_job(input, import)?;
+    for dir in fillers {
+        for mut d in manifest::load_job(dir, import)? {
+            if demands.iter().any(|o| o.part.name == d.part.name) {
+                anyhow::bail!("filler \"{}\" in {} has the name of another part", d.part.name, dir.display());
+            }
+            d.filler = true;
+            demands.push(d);
+        }
+    }
+    if params.align_panels {
+        for (i, deg) in solver::align_panels(&mut demands, params) {
+            log::info!("{}: turned by {deg:.2}° to lay its long axis along the fabric", demands[i].part.name);
+        }
+    }
     // Intermediate layouts go to `steps/` so a run can be looked through afterwards.
     let steps_dir = out_dir.join("steps");
     fs::create_dir_all(&steps_dir).with_context(|| format!("{}: cannot create directory", steps_dir.display()))?;
@@ -72,11 +94,10 @@ pub fn run(
         .collect();
 
     fs::create_dir_all(out_dir).with_context(|| format!("{}: cannot create directory", out_dir.display()))?;
-    let library = dxf_out::PartLibrary::load(&demands)?;
     let mut sheet_files = Vec::new();
     for (i, sheet) in outcome.result.sheets.iter().enumerate() {
         let path = out_dir.join(format!("sheet_{}.dxf", i + 1));
-        dxf_out::write_sheet(&path, &demands, &library, sheet, dxf_opts)?;
+        dxf_out::write_sheet(&path, &demands, sheet, output)?;
         dxf_out::write_svg(&path.with_extension("svg"), &demands, sheet)?;
         sheet_files.push(path);
     }

@@ -127,6 +127,43 @@ impl Shape {
         BBox::of(self.outer.iter().copied())
     }
 
+    /// Direction of the long axis, degrees in (-90, 90], and the elongation (length along the axis /
+    /// width across it). The axis is the direction across which the outer contour is narrowest.
+    pub fn long_axis(&self) -> (f64, f64) {
+        let extent = |deg: f64| {
+            let (s, c) = deg.to_radians().sin_cos();
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for p in &self.outer {
+                let v = c * p.x + s * p.y;
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            hi - lo
+        };
+        // Coarse 0.5° scan, then 0.01° around the best.
+        let best = |from: f64, to: f64, step: f64| {
+            let n = ((to - from) / step).round() as i64;
+            (0..=n).map(|k| from + k as f64 * step).min_by(|a, b| extent(a + 90.0).total_cmp(&extent(b + 90.0))).unwrap()
+        };
+        let coarse = best(-89.5, 90.0, 0.5);
+        let mut axis = best(coarse - 0.5, coarse + 0.5, 0.01);
+        if axis <= -90.0 {
+            axis += 180.0;
+        } else if axis > 90.0 {
+            axis -= 180.0;
+        }
+        let width = extent(axis + 90.0);
+        (axis, if width > 0.0 { extent(axis) / width } else { f64::INFINITY })
+    }
+
+    /// Mirror image across the Y axis (x -> -x): a left-hand part from a right-hand one.
+    pub fn mirrored(&self) -> Shape {
+        let map = |r: &[Pt]| r.iter().map(|p| Pt::new(-p.x, p.y)).collect::<Vec<Pt>>();
+        let mut s = Shape::new(map(&self.outer), self.holes.iter().map(|h| map(h)).collect());
+        s.lines = self.lines.iter().map(|l| map(l)).collect();
+        s
+    }
+
     pub fn transformed(&self, t: &Transform) -> Shape {
         let map = |r: &Ring| r.iter().map(|&p| t.apply(p)).collect::<Ring>();
         Shape {
@@ -154,12 +191,29 @@ impl Transform {
     }
 }
 
+/// How a part's shape lies relative to its source drawing: the shape is the drawing scaled to mm,
+/// mirrored across the Y axis if `mirrored`, then turned by `rotation_deg` about the origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Drawn {
+    /// Drawing units to mm.
+    pub scale: f64,
+    pub mirrored: bool,
+    pub rotation_deg: f64,
+}
+
+impl Default for Drawn {
+    fn default() -> Self {
+        Self { scale: 1.0, mirrored: false, rotation_deg: 0.0 }
+    }
+}
+
 /// A part read from one DXF.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Part {
     pub name: String,
     pub source: PathBuf,
     pub shape: Shape,
+    pub drawn: Drawn,
 }
 
 /// A part and how many are needed.
@@ -167,6 +221,9 @@ pub struct Part {
 pub struct Demand {
     pub part: Part,
     pub qty: usize,
+    /// A filler (e.g. a small part of another job): up to `qty` copies go into free space of the
+    /// sheets, never making a sheet longer or adding one. Leftover fillers are not an error.
+    pub filler: bool,
 }
 
 /// One placed copy of a part.
@@ -200,4 +257,24 @@ pub struct Unplaced {
 pub struct NestResult {
     pub sheets: Vec<Sheet>,
     pub unplaced: Vec<Unplaced>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirrored_keeps_orientation_and_inner_geometry() {
+        let mut s = Shape::new(
+            vec![Pt::new(0.0, 0.0), Pt::new(4.0, 0.0), Pt::new(3.0, 2.0), Pt::new(0.0, 2.0)],
+            vec![vec![Pt::new(1.0, 0.5), Pt::new(1.0, 1.5), Pt::new(2.0, 1.5), Pt::new(2.0, 0.5)]],
+        );
+        s.lines = vec![vec![Pt::new(0.5, 0.5), Pt::new(3.0, 1.0)]];
+        let m = s.mirrored();
+        assert_eq!(m.area(), s.area());
+        assert!(signed_area(&m.holes[0]) < 0.0);
+        assert_eq!(m.lines[0], vec![Pt::new(-0.5, 0.5), Pt::new(-3.0, 1.0)]);
+        assert!(m.outer.contains(&Pt::new(-3.0, 2.0)));
+        assert_eq!(m.mirrored().bbox(), s.bbox());
+    }
 }

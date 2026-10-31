@@ -121,8 +121,9 @@ mod tests {
     fn square(size: f64) -> Demand {
         let outer = vec![Pt::new(0.0, 0.0), Pt::new(size, 0.0), Pt::new(size, size), Pt::new(0.0, size)];
         Demand {
-            part: Part { name: "sq".into(), source: "sq.dxf".into(), shape: Shape::new(outer, vec![]) },
+            part: Part { name: "sq".into(), source: "sq.dxf".into(), shape: Shape::new(outer, vec![]), ..Default::default() },
             qty: 2,
+            filler: false,
         }
     }
 

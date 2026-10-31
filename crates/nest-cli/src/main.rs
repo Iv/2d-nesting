@@ -38,6 +38,14 @@ enum StrategyArg {
     Greedy,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelAxis {
+    /// Along the panel's long axis
+    Long,
+    /// Along the drawing's X axis
+    Drawn,
+}
+
 #[derive(Args, Debug)]
 struct ExtractArgs {
     /// Assembly DXF with every part in its own block
@@ -87,6 +95,16 @@ struct RunArgs {
     /// Folder with part DXF files and an optional parts.toml / parts.csv manifest
     input: PathBuf,
 
+    /// Folder of filler parts (e.g. small parts of another job; quantity = at most this many) that
+    /// go into free space of the sheets without making them longer; may be repeated
+    #[arg(long)]
+    fillers: Vec<PathBuf>,
+
+    /// Write parts to the sheet DXF as traced contours with large name labels (for checking
+    /// layouts) instead of their source drawings inserted unchanged as blocks
+    #[arg(long)]
+    outlines: bool,
+
     /// Output folder (sheet_N.dxf, report.txt, steps/); default runs/<input name>_<date>_<time>
     #[arg(short, long)]
     out: Option<PathBuf>,
@@ -115,9 +133,44 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     rotation_step: f64,
 
+    /// Parts whose name contains one of these (comma-separated, case-insensitive) are panels:
+    /// their deviation from a base angle is penalised
+    #[arg(long, default_value = "top,bot", value_delimiter = ',')]
+    panels: Vec<String>,
+
+    /// Panel tilt penalty: a panel turned d degrees off a base angle costs this · d² mm of
+    /// fabric length (0 = no penalty)
+    #[arg(long, default_value_t = 10.0)]
+    tilt_penalty: f64,
+
+    /// Largest tilt of a panel off a base angle, degrees (within --rotation-tolerance)
+    #[arg(long, default_value_t = 3.0)]
+    panel_tolerance: f64,
+
+    /// Straight direction of a panel: along its long axis (elongated panels are turned before
+    /// nesting) or the drawing's X axis
+    #[arg(long, value_enum, default_value_t = PanelAxis::Long)]
+    panel_axis: PanelAxis,
+
+    /// A free strip along the top of a sheet, or free space open to the right end, at least this
+    /// wide (mm) is reusable and not counted as used fabric; sheets with spare length are re-nested
+    /// to leave a strip (0 = off)
+    #[arg(long, default_value_t = 150.0)]
+    min_strip: f64,
+
+    /// Fabric saved at the end of a sheet is worth this many times the same area left as a strip
+    /// on top or free space at the right end (1 = equally valuable)
+    #[arg(long, default_value_t = 2.0)]
+    strip_ratio: f64,
+
     /// How parts are distributed over sheets
     #[arg(long, value_enum, default_value_t = StrategyArg::Balanced)]
     strategy: StrategyArg,
+
+    /// Quick drafts (each 1/10 of the time limit) that decide which parts go on which sheet; the
+    /// sheets of the best one are then nested again with the full time limit. 0 = off
+    #[arg(long, default_value_t = 0)]
+    drafts: usize,
 
     /// Search time per sheet, seconds
     #[arg(short, long, default_value_t = 60.0, conflicts_with = "iterations")]
@@ -155,11 +208,7 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     close_gaps: f64,
 
-    /// Also write part names as text on layer LABELS in the DXF
-    #[arg(long)]
-    labels: bool,
-
-    /// Inner geometry may stick out of the outer contour by this much (marks on the outline), mm
+    /// How far inner geometry (marks, open lines) may stick out of the outer contour, mm
     #[arg(long, default_value_t = 2.0)]
     edge_tolerance: f64,
 
@@ -232,6 +281,15 @@ fn extract_labelled(args: ExtractLabelledArgs) -> Result<()> {
 }
 
 fn run(cli: RunArgs) -> Result<bool> {
+    if !(cli.strip_ratio >= 1.0) {
+        bail!("--strip-ratio must be at least 1");
+    }
+    if !(cli.panel_tolerance >= 0.0) {
+        bail!("--panel-tolerance must not be negative");
+    }
+    if !(cli.tilt_penalty >= 0.0) {
+        bail!("--tilt-penalty must not be negative");
+    }
     if !(cli.time_limit > 0.0) {
         bail!("--time-limit must be positive");
     }
@@ -260,6 +318,12 @@ fn run(cli: RunArgs) -> Result<bool> {
         rotations: cli.rotations,
         rotation_tolerance: cli.rotation_tolerance,
         rotation_step: cli.rotation_step,
+        panels: cli.panels,
+        tilt_penalty: cli.tilt_penalty,
+        panel_tolerance: cli.panel_tolerance,
+        align_panels: cli.panel_axis == PanelAxis::Long,
+        min_strip: cli.min_strip,
+        strip_ratio: cli.strip_ratio,
         budget: match cli.iterations {
             Some(n) => Budget::Iterations(n),
             None => Budget::Time(Duration::from_secs_f64(cli.time_limit)),
@@ -268,6 +332,7 @@ fn run(cli: RunArgs) -> Result<bool> {
             StrategyArg::Balanced => nest_core::solver::Strategy::Balanced,
             StrategyArg::Greedy => nest_core::solver::Strategy::Greedy,
         },
+        drafts: cli.drafts,
         seed: cli.seed,
         workers: cli.workers,
         cancel: Some(cancel),
@@ -282,8 +347,14 @@ fn run(cli: RunArgs) -> Result<bool> {
     let command: Vec<String> = std::env::args().collect();
     std::fs::write(out_dir.join("command.txt"), command.join(" ") + "\n")?;
 
-    let dxf_opts = nest_core::dxf_out::DxfOptions { labels: cli.labels };
-    let out = nest_core::run(&cli.input, &out_dir, &import, &params, dxf_opts)?;
+    let out = nest_core::run_with_fillers(
+        &cli.input,
+        &cli.fillers,
+        &out_dir,
+        &import,
+        &params,
+        &nest_core::dxf_out::OutputOptions { outlines: cli.outlines },
+    )?;
     println!("{}", out.report);
     for f in &out.sheet_files {
         println!("Wrote {}", f.display());

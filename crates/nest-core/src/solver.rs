@@ -15,6 +15,14 @@ use rand::SeedableRng;
 use sparrow::config::{ShrinkDecayStrategy, DEFAULT_SPARROW_CONFIG};
 use sparrow::consts::{DEFAULT_COMPRESS_TIME_RATIO, DEFAULT_EXPLORE_TIME_RATIO, DEFAULT_FAIL_DECAY_RATIO_CMPR};
 use sparrow::optimizer::optimize;
+use jagua_rs::entities::PlacedItem;
+use jagua_rs::geometry::DTransformation;
+use jagua_rs::probs::spp::entities::{SPPlacement, SPProblem};
+use sparrow::consts::LBF_SAMPLE_CONFIG;
+use sparrow::eval::lbf_evaluator::LBFEvaluator;
+use sparrow::eval::sample_eval::SampleEval;
+use sparrow::sample::search::{search_placement, SampleConfig};
+use sparrow::sample::tilt::TiltPenalty;
 use sparrow::util::listener::{ReportType, SolutionListener};
 use sparrow::util::terminator::Terminator;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -54,8 +62,32 @@ pub struct NestParams {
     pub rotation_tolerance: f64,
     /// Step of the deviation around each base angle, degrees.
     pub rotation_step: f64,
+    /// Parts whose name contains one of these (case-insensitive) are panels: their deviation from a
+    /// base angle is penalised. Other parts (ribs) may use the whole tolerance freely.
+    pub panels: Vec<String>,
+    /// Penalty for a panel deviating from a base angle by d degrees: `tilt_penalty · d²`, in mm of
+    /// used length. Among the layouts found, the one with the least length + penalty is kept.
+    /// 0 turns the penalty off.
+    pub tilt_penalty: f64,
+    /// Panels deviate from a base angle by at most this much, degrees (the general
+    /// `rotation_tolerance` still applies). Layouts with steeper panels would lose to the penalty
+    /// anyway, so the search does not spend time on them.
+    pub panel_tolerance: f64,
+    /// Turn elongated panels so their long axis lies along a base angle before nesting (see
+    /// [`align_panels`]). Off: the drawing's X axis is the panel's straight direction.
+    pub align_panels: bool,
+    /// A free band along the top of a sheet at least this wide (mm) is reusable fabric, like the
+    /// fabric beyond the cut: it is not counted as used. 0 turns this off.
+    pub min_strip: f64,
+    /// How many times fabric saved at the end of a sheet is worth more than the same area left as a
+    /// free strip on top: the strip counts as saved fabric divided by this. 1 = equally valuable.
+    pub strip_ratio: f64,
     pub budget: Budget,
     pub strategy: Strategy,
+    /// 0: sheets are made once with the full budget. Otherwise this many quick drafts (each with
+    /// 1/10 of the budget, different seeds) decide which parts go on which sheet, and every sheet of
+    /// the best draft is then nested again with the full budget.
+    pub drafts: usize,
     pub seed: Option<u64>,
     /// Number of sparrow separator workers.
     pub workers: usize,
@@ -72,8 +104,15 @@ impl Default for NestParams {
             rotations: vec![0.0, 90.0, 180.0, 270.0],
             rotation_tolerance: 0.0,
             rotation_step: 1.0,
+            panels: vec!["top".into(), "bot".into()],
+            tilt_penalty: 10.0,
+            panel_tolerance: 3.0,
+            align_panels: true,
+            min_strip: 150.0,
+            strip_ratio: 2.0,
             budget: Budget::Time(Duration::from_secs(60)),
             strategy: Strategy::Balanced,
+            drafts: 0,
             seed: None,
             workers: DEFAULT_SPARROW_CONFIG.expl_cfg.separator_config.n_workers,
             cancel: None,
@@ -109,6 +148,130 @@ impl NestParams {
         out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
         out
     }
+
+    /// Whether a part (by name) is a panel, see [`NestParams::panels`].
+    pub fn is_panel(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        self.panels.iter().any(|p| !p.is_empty() && name.contains(&p.to_lowercase()))
+    }
+
+    /// Deviation of an angle from the closest base angle, degrees (≥ 0).
+    pub fn tilt(&self, rotation_deg: f64) -> f64 {
+        self.rotations
+            .iter()
+            .map(|b| ((rotation_deg - b).rem_euclid(360.0) + 180.0).rem_euclid(360.0) - 180.0)
+            .map(f64::abs)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Width of the free band along the top of a sheet if it counts as reusable (≥ `min_strip`), else 0.
+    pub fn top_strip(&self, demands: &[Demand], placements: &[Placement]) -> f64 {
+        if self.min_strip <= 0.0 || placements.is_empty() {
+            return 0.0;
+        }
+        let top = placements.iter().map(|p| demands[p.part].part.shape.transformed(&p.transform).bbox().max.y).fold(0.0, f64::max);
+        let h = (self.width - top).max(0.0);
+        if h >= self.min_strip - 1e-6 { h } else { 0.0 }
+    }
+
+    /// Fabric a sheet consumes, as length of the full width: the used length, less the reusable
+    /// band along the top, valued at 1/`strip_ratio` of fabric saved at the end of the sheet.
+    pub fn consumed(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> f64 {
+        let free = self.top_strip(demands, placements) * used_length + self.right_pocket(demands, placements, used_length);
+        used_length - free / self.width / self.strip_ratio.max(1.0)
+    }
+
+    /// Free area (mm²) open to the right end of a sheet, below the top strip: wherever bands across
+    /// the sheet end at least `min_strip` short of the used length, over a stretch at least
+    /// `min_strip` tall. A laser cut can follow the parts there, and the fabric takes parts of other
+    /// jobs; a hole between parts cannot. Like the top strip it is worth 1/`strip_ratio` of length.
+    pub fn right_pocket(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> f64 {
+        /// Height of the bands the sheet is scanned in, mm.
+        const BAND: f64 = 5.0;
+        if self.min_strip <= 0.0 || placements.is_empty() {
+            return 0.0;
+        }
+        let top = self.width - self.top_strip(demands, placements);
+        let n = (top / BAND).ceil() as usize;
+        // Rightmost part boundary in each band.
+        let mut right = vec![0.0f64; n];
+        for p in placements {
+            let ring = demands[p.part].part.shape.transformed(&p.transform).outer;
+            for i in 0..ring.len() {
+                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                let (lo, hi) = (a.y.min(b.y).max(0.0), a.y.max(b.y).min(top));
+                if lo > hi {
+                    continue;
+                }
+                let x_at = |y: f64| if (b.y - a.y).abs() < 1e-12 { a.x.max(b.x) } else { a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y) };
+                // Bands the edge passes through; touching a band's boundary does not count.
+                let end = ((hi / BAND).ceil() as usize).min(n);
+                for (k, r) in right.iter_mut().enumerate().take(end).skip((lo / BAND) as usize) {
+                    let (y0, y1) = ((k as f64 * BAND).max(lo), ((k + 1) as f64 * BAND).min(hi));
+                    *r = r.max(x_at(y0)).max(x_at(y1));
+                }
+            }
+        }
+        let (mut area, mut run_h, mut run_a) = (0.0, 0.0, 0.0);
+        for k in 0..=n {
+            let h = (top - k as f64 * BAND).min(BAND);
+            let gap = if k < n { used_length - right[k] } else { 0.0 };
+            if gap >= self.min_strip {
+                run_h += h;
+                run_a += gap * h;
+            } else {
+                if run_h >= self.min_strip - 1e-6 {
+                    area += run_a;
+                }
+                (run_h, run_a) = (0.0, 0.0);
+            }
+        }
+        area
+    }
+
+    /// Penalty of a part placed at `rotation_deg`, mm of length (0 for non-panels).
+    pub fn tilt_cost(&self, name: &str, rotation_deg: f64) -> f64 {
+        if self.tilt_penalty > 0.0 && self.is_panel(name) {
+            let d = self.tilt(rotation_deg);
+            // Below the angle snapping noise a part counts as straight.
+            if d < 1e-3 { 0.0 } else { self.tilt_penalty * d * d }
+        } else {
+            0.0
+        }
+    }
+}
+
+/// A sheet is not expected to be packed denser than this, which bounds the probes worth trying.
+const MAX_DENSITY: f64 = 0.92;
+/// Density used to estimate the sheet count, how much to move out of an overfull sheet and the
+/// length a part takes up on some sheet.
+const TARGET_DENSITY: f64 = 0.85;
+/// A draft gets this fraction (1/n) of the per-sheet budget, see [`NestParams::drafts`].
+const DRAFT_SHARE: u32 = 10;
+
+/// Panels this much longer than wide have a long axis (the grain direction) to align.
+pub const MIN_PANEL_ELONGATION: f64 = 2.0;
+
+/// Turns every elongated panel so its long axis lies along X: the fabric grain should run along the
+/// panel, while drawings often show it at an angle. The shape is rotated in place (by at most 45°,
+/// to the closest of 0/90/180/270), so the layout, validation and output all use the turned part.
+/// Returns `(part index, degrees turned)` for each turned part.
+pub fn align_panels(demands: &mut [Demand], params: &NestParams) -> Vec<(usize, f64)> {
+    let mut turned = Vec::new();
+    for (i, d) in demands.iter_mut().enumerate() {
+        if !params.is_panel(&d.part.name) {
+            continue;
+        }
+        let (axis, elongation) = d.part.shape.long_axis();
+        let off = axis - 90.0 * (axis / 90.0).round();
+        if elongation < MIN_PANEL_ELONGATION || off.abs() < 0.01 {
+            continue;
+        }
+        d.part.shape = d.part.shape.transformed(&Transform { rotation_deg: -off, translation: Pt::new(0.0, 0.0) });
+        d.part.drawn.rotation_deg -= off;
+        turned.push((i, -off));
+    }
+    turned
 }
 
 #[derive(Debug, Clone)]
@@ -155,12 +318,11 @@ pub fn nest(demands: &[Demand], params: &NestParams) -> Result<NestOutcome> {
 ///
 /// Half of the per-sheet budget goes to step 1, the other half is shared by the probes of step 3
 /// and the compaction.
+///
+/// With [`NestParams::drafts`] > 0 all of the above runs that many times at 1/10 of the budget;
+/// the draft with the fewest sheets and least fabric + tilt penalty wins, and each of its sheets is
+/// nested again with the full budget (its parts stay on it).
 pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn FnMut(&Step)) -> Result<NestOutcome> {
-    /// Probes per sheet; each gets an equal share of half the sheet budget.
-    const MAX_PROBES: u32 = 8;
-    /// A sheet is not expected to be packed denser than this, which bounds the probes worth trying.
-    const MAX_DENSITY: f64 = 0.92;
-
     let started = Instant::now();
     if !(params.width > 0.0 && params.length > 0.0 && params.gap >= 0.0 && params.gap < params.width) {
         bail!("invalid parameters: sheet {} x {} mm, gap {} mm", params.width, params.length, params.gap);
@@ -174,8 +336,6 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let seed = params.seed.unwrap_or_else(rand::random);
     let (prep, unplaced) = prepare(demands, params);
 
-    let mut remaining: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() { demands[i].qty } else { 0 }).collect();
-    let mut sheets: Vec<Sheet> = Vec::new();
     let mut run = 0u64;
     let mut next_seed = || {
         run += 1;
@@ -184,15 +344,135 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
     let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
     let area = |i: usize| demands[i].part.shape.area();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
+    // Fabric a sheet consumes plus the tilt penalty: what the polishing passes minimise.
+    let sheet_cost = |pl: &[Placement]| params.consumed(demands, pl, len_of(pl)) + tilt_of(pl);
     let mut report = |sheet: usize, kind: String, pl: &[Placement]| {
         observer(&Step { sheet, kind, placements: pl.to_vec(), used_length: len_of(pl), fits: fits(pl) });
     };
 
+    let mut sheets = if params.drafts == 0 {
+        make_sheets(demands, params, &prep, &mut next_seed, &mut report)?
+    } else {
+        // Quick drafts decide which parts go on which sheet; the best one is then polished, each
+        // sheet nested again with the full budget and kept if that consumes less fabric.
+        let draft_params = NestParams { budget: params.budget.share(1, DRAFT_SHARE), ..params.clone() };
+        let mut best: Option<((usize, f64), Vec<Sheet>)> = None;
+        for k in 1..=params.drafts {
+            let draft = make_sheets(demands, &draft_params, &prep, &mut next_seed, &mut |n, kind, pl| report(n, format!("draft{k} {kind}"), pl))?;
+            let score = (draft.len(), draft.iter().map(|s| sheet_cost(&s.placements)).sum::<f64>());
+            info!("draft {k}: {} sheets, {:.1} mm", score.0, score.1);
+            if best.as_ref().is_none_or(|b| score.0 < b.0.0 || (score.0 == b.0.0 && score.1 < b.0.1)) {
+                best = Some((score, draft));
+            }
+        }
+        let mut sheets = best.expect("at least one draft").1;
+        for (n, sheet) in sheets.iter_mut().enumerate() {
+            let mut counts = vec![0usize; demands.len()];
+            for p in &sheet.placements {
+                counts[p.part] += 1;
+            }
+            let trial = prep.strip(&counts, params, params.length, params.budget, next_seed())?;
+            report(n + 1, "polish".into(), &trial);
+            if fits(&trial) && sheet_cost(&trial) < sheet_cost(&sheet.placements) - eps {
+                sheet.used_length = len_of(&trial);
+                sheet.placements = trial;
+            }
+        }
+        sheets
+    };
+
+    // A free band along the top is reusable fabric: every sheet with spare length is nested again
+    // into narrower strips, and kept that way if it then consumes less fabric (tilt included).
+    if params.min_strip > 0.0 {
+        let cost = sheet_cost;
+        for (n, sheet) in sheets.iter_mut().enumerate() {
+            let parts: f64 = sheet.placements.iter().map(|p| area(p.part)).sum();
+            // Widest band that can still hold the parts on the sheet at a plausible density.
+            let h_max = params.width - parts / (MAX_DENSITY * params.length);
+            if h_max < params.min_strip {
+                continue;
+            }
+            let mut counts = vec![0usize; demands.len()];
+            for p in &sheet.placements {
+                counts[p.part] += 1;
+            }
+            let mut best = cost(&sheet.placements);
+            for h in [params.min_strip, (params.min_strip + h_max) / 2.0, h_max] {
+                let narrow = NestParams { width: params.width - h, ..params.clone() };
+                // Parts that fit the narrower strip at no angle make sparrow fail: just skip that try.
+                let Ok(trial) = prep.strip(&counts, &narrow, params.length, params.budget.share(1, 4), next_seed()) else {
+                    continue;
+                };
+                report(n + 1, format!("strip {h:.0}"), &trial);
+                if fits(&trial) && cost(&trial) < best - eps {
+                    best = cost(&trial);
+                    sheet.used_length = len_of(&trial);
+                    sheet.placements = trial;
+                }
+            }
+        }
+    }
+
+    // Parts slide left and down on the exact geometry, closing holes the solver had no reason to
+    // close: the free space moves to the right end and the top, where it counts as reusable.
+    for (n, sheet) in sheets.iter_mut().enumerate() {
+        let mut pl = sheet.placements.clone();
+        if crate::compact::slide(demands, &mut pl, params.gap) && sheet_cost(&pl) <= sheet_cost(&sheet.placements) + eps {
+            sheet.used_length = len_of(&pl);
+            sheet.placements = pl;
+            report(n + 1, "slide".into(), &sheet.placements);
+        }
+    }
+
+    // Fillers go into the free space of the finished sheets, which stay as they are.
+    let mut fillers: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() && demands[i].filler { demands[i].qty } else { 0 }).collect();
+    for (n, sheet) in sheets.iter_mut().enumerate() {
+        if fillers.iter().all(|&f| f == 0) {
+            break;
+        }
+        let added = prep.insert_fillers(&sheet.placements, &mut fillers, params, sheet.used_length, next_seed())?;
+        if !added.is_empty() {
+            info!("sheet {}: {} fillers added", n + 1, added.len());
+            sheet.placements.extend(added);
+            sheet.placements.sort_by_key(|p| p.part);
+            report(n + 1, "filled".into(), &sheet.placements);
+        }
+    }
+
+    Ok(NestOutcome { result: NestResult { sheets, unplaced }, seed, elapsed: started.elapsed() })
+}
+
+/// Fills sheets with all non-filler parts by the chosen strategy (see [`nest_observed`]).
+fn make_sheets(
+    demands: &[Demand],
+    params: &NestParams,
+    prep: &Prepared,
+    next_seed: &mut dyn FnMut() -> u64,
+    report: &mut dyn FnMut(usize, String, &[Placement]),
+) -> Result<Vec<Sheet>> {
+    /// Probes per sheet; each gets an equal share of half the sheet budget.
+    const MAX_PROBES: u32 = 8;
+
+    let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
+    let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
+    let area = |i: usize| demands[i].part.shape.area();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+    let eps = 1e-6;
+    let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
+    // A probe that adds part `c` is kept only if the sheet grows by no more than the part would take
+    // up elsewhere: squeezing a part onto a sheet at the cost of a much longer sheet wastes fabric.
+    let worth = |c: usize, before: &[Placement], after: &[Placement]| {
+        fits(after) && len_of(after) - len_of(before) <= area(c) / (params.width * TARGET_DENSITY) + eps
+    };
+    // Fillers are kept out until all sheets are made.
+    let mut remaining: Vec<usize> =
+        (0..demands.len()).map(|i| if prep.items[i].is_some() && !demands[i].filler { demands[i].qty } else { 0 }).collect();
+    let mut sheets: Vec<Sheet> = Vec::new();
+
     if params.strategy == Strategy::Balanced && remaining.iter().sum::<usize>() > 0 {
-        /// Density used to estimate the sheet count and how much to move out of an overfull sheet.
-        const TARGET_DENSITY: f64 = 0.85;
         const MAX_REPAIRS: usize = 4;
         let (w, l) = (params.width, params.length);
         let total: f64 = (0..demands.len()).map(|i| remaining[i] as f64 * area(i)).sum();
@@ -221,7 +501,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         let mut overflow = vec![0usize; demands.len()];
         for mut counts in batches {
             let sheet_no = sheets.len() + 1;
-            let mut pl = prep.strip(&counts, params, params.budget.share(1, 4), next_seed())?;
+            let mut pl = prep.strip(&counts, params, params.length, params.budget.share(1, 4), next_seed())?;
             report(sheet_no, "batch".into(), &pl);
             let mut repairs = 0;
             while !fits(&pl) && repairs < MAX_REPAIRS {
@@ -239,7 +519,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
                     overflow[c] += 1;
                     moved += area(c);
                 }
-                pl = prep.strip(&counts, params, params.budget.share(1, 4), next_seed())?;
+                pl = prep.strip(&counts, params, params.length, params.budget.share(1, 4), next_seed())?;
                 report(sheet_no, format!("repair{repairs}"), &pl);
             }
             if !fits(&pl) {
@@ -266,9 +546,9 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
                 }
                 counts[c] += 1;
                 probes += 1;
-                let trial = prep.strip(&counts, params, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
+                let trial = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
                 report(sheet_no, format!("probe +{}", demands[c].part.name), &trial);
-                if fits(&trial) {
+                if worth(c, &pl, &trial) {
                     overflow[c] -= 1;
                     free -= area(c);
                     pl = trial;
@@ -290,7 +570,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
 
     while remaining.iter().sum::<usize>() > 0 {
         let sheet_no = sheets.len() + 1;
-        let strip = prep.strip(&remaining, params, params.budget.share(1, 2), next_seed())?;
+        let strip = prep.strip(&remaining, params, params.length, params.budget.share(1, 2), next_seed())?;
         report(sheet_no, "strip".into(), &strip);
         if fits(&strip) {
             info!("sheet {sheet_no}: last sheet, {} parts, used length {:.1} mm", strip.len(), len_of(&strip));
@@ -322,9 +602,9 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
             }
             counts[c] += 1;
             probes += 1;
-            let trial = prep.strip(&counts, params, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
+            let trial = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
             report(sheet_no, format!("probe +{}", demands[c].part.name), &trial);
-            if fits(&trial) {
+            if worth(c, &chosen, &trial) {
                 free -= area(c);
                 chosen = trial;
                 // Try the same part again: identical copies often pair up well.
@@ -336,9 +616,9 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
 
         // Whatever lies beyond a straight cut after the last part is reusable fabric, so the sheet is
         // compacted once more: a ragged right edge (typical right after the cut) would waste it.
-        let compact = prep.strip(&counts, params, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
+        let compact = prep.strip(&counts, params, params.length, params.budget.share(1, 2 * MAX_PROBES), next_seed())?;
         report(sheet_no, "compact".into(), &compact);
-        if fits(&compact) && len_of(&compact) < len_of(&chosen) {
+        if fits(&compact) && len_of(&compact) + tilt_of(&compact) < len_of(&chosen) + tilt_of(&chosen) {
             chosen = compact;
         }
 
@@ -349,8 +629,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         report(sheet_no, "sheet".into(), &chosen);
         sheets.push(Sheet { width: params.width, length: params.length, used_length: len_of(&chosen), placements: chosen });
     }
-
-    Ok(NestOutcome { result: NestResult { sheets, unplaced }, seed, elapsed: started.elapsed() })
+    Ok(sheets)
 }
 
 /// Solver-ready items: one per demand, `None` for parts that fit the sheet at no allowed angle.
@@ -360,6 +639,8 @@ struct Prepared<'a> {
     angles: Vec<f64>,
     /// Shift that moves each part's bbox to the origin before it goes to the solver.
     offsets: Vec<Pt>,
+    /// Rotation penalties for sparrow, `None` if no part is penalised.
+    tilt: Option<&'static TiltPenalty>,
 }
 
 fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec<Unplaced>) {
@@ -369,15 +650,22 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
     let offsets: Vec<Pt> = demands.iter().map(|d| d.part.shape.bbox().min).collect();
     let mut unplaced = Vec::new();
     let mut items = Vec::new();
+    let mut tilt = TiltPenalty::default();
     for (idx, d) in demands.iter().enumerate() {
         let fitting: Vec<f64> = angles
             .iter()
             .copied()
+            .filter(|&r| !params.is_panel(&d.part.name) || params.tilt(r) <= params.panel_tolerance + 1e-9)
             .filter(|&r| {
                 let b = rotated_bbox(d, r);
                 b.height() <= params.width + 1e-6 && b.width() <= params.length + 1e-6
             })
             .collect();
+        if fitting.is_empty() && d.filler {
+            items.push(None);
+            tilt.items.push(None);
+            continue;
+        }
         if fitting.is_empty() {
             unplaced.push(Unplaced {
                 part: idx,
@@ -385,6 +673,7 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
                 reason: format!("does not fit a {} x {} mm sheet at any allowed angle", params.width, params.length),
             });
             items.push(None);
+            tilt.items.push(None);
             continue;
         }
         let make = |ring: Vec<(f32, f32)>| BaseItem {
@@ -415,19 +704,27 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
                     Err(e) => {
                         unplaced.push(Unplaced { part: idx, qty: d.qty, reason: format!("outline rejected by the solver: {e}") });
                         items.push(None);
+                        tilt.items.push(None);
                         continue;
                     }
                 }
             }
         };
         items.push(Some(item));
+        let costs: Vec<(f32, f32)> = fitting.iter().map(|&r| ((r.to_radians()) as f32, params.tilt_cost(&d.part.name, r) as f32)).collect();
+        tilt.items.push(costs.iter().any(|c| c.1 > 0.0).then_some(costs));
     }
-    (Prepared { demands, items, angles, offsets }, unplaced)
+    // One small table per job, shared by all solver threads for the rest of the process: sparrow's
+    // configs are `Copy`, so it takes a `&'static`.
+    let tilt = tilt.items.iter().any(Option::is_some).then(|| &*Box::leak(Box::new(tilt)));
+    (Prepared { demands, items, angles, offsets, tilt }, unplaced)
 }
 
 impl Prepared<'_> {
     /// One sparrow strip run over `counts[i]` copies of each part; returns placements in sheet coordinates.
-    fn strip(&self, counts: &[usize], params: &NestParams, budget: Budget, seed: u64) -> Result<Vec<Placement>> {
+    /// Of the layouts sparrow found, one no longer than `max_len` is preferred (least fabric
+    /// consumed + tilt penalty).
+    fn strip(&self, counts: &[usize], params: &NestParams, max_len: f64, budget: Budget, seed: u64) -> Result<Vec<Placement>> {
         let g = params.gap;
         let items: Vec<ExtItem> = counts
             .iter()
@@ -445,8 +742,8 @@ impl Prepared<'_> {
         };
         let names: Vec<&str> = self.demands.iter().map(|d| d.part.name.as_str()).collect();
         // jagua-rs / sparrow panic on some degenerate geometry; turn that into an error instead of aborting.
-        let solution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_sparrow(&ext_instance, &names, params, budget, seed)
+        let solutions = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_sparrow(&ext_instance, &names, params, budget, seed, self.tilt)
         }))
         .map_err(|p| {
             let msg = p
@@ -457,31 +754,114 @@ impl Prepared<'_> {
             anyhow::anyhow!("internal solver error: {msg}")
         })??;
 
-        let mut placements = Vec::new();
-        for pi in solution.layout_snapshot().placed_items().values() {
-            let part = pi.item().external_id() as usize;
-            let ext = jagua_rs::io::export::int_to_ext_transformation(&pi.d_transf(), &pi.item().shape_orig().pre_transform);
-            if ext.reflected {
-                bail!("the solver returned a mirrored part although mirroring was not allowed");
+        let mut best: Option<(bool, f64, Vec<Placement>)> = None;
+        for sol in &solutions {
+            let pl = self.placements(sol, g)?;
+            let len = pl.iter().map(|p| self.demands[p.part].part.shape.transformed(&p.transform).bbox().max.x).fold(0.0, f64::max);
+            // Fabric consumed (free space open to the top or the right end counts less) + tilt penalty.
+            let cost = params.consumed(self.demands, &pl, len)
+                + pl.iter().map(|p| params.tilt_cost(&self.demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+            // A layout that fits the sheet beats one that does not, whatever the penalty.
+            let fits = len <= max_len + 1e-6;
+            if best.as_ref().is_none_or(|b| (fits, -cost) > (b.0, -b.1)) {
+                best = Some((fits, cost, pl));
             }
-            let rot = f64::from(ext.rotation()).to_degrees();
-            let (tx, ty) = ext.translation();
-            // Result: R·(p − offset) + t − (g, g).
-            let r = Transform { rotation_deg: rot, translation: Pt::new(0.0, 0.0) }.apply(self.offsets[part]);
-            placements.push(Placement {
-                part,
-                transform: Transform {
-                    rotation_deg: snap_angle(rot, &self.angles),
-                    translation: Pt::new(f64::from(tx) - r.x - g, f64::from(ty) - r.y - g),
-                },
-            });
         }
-        placements.sort_by_key(|p| p.part);
+        let placements = best.context("sparrow returned no layout")?.2;
         let wanted: usize = counts.iter().sum();
         if placements.len() != wanted {
             bail!("the solver placed {} of {wanted} parts", placements.len());
         }
         Ok(placements)
+    }
+
+    /// Placements of a sparrow solution in sheet coordinates.
+    fn placements(&self, solution: &SPSolution, g: f64) -> Result<Vec<Placement>> {
+        let mut placements =
+            solution.layout_snapshot().placed_items().values().map(|pi| self.placement(pi, g)).collect::<Result<Vec<_>>>()?;
+        placements.sort_by_key(|p| p.part);
+        Ok(placements)
+    }
+
+    /// A placed solver item in sheet coordinates.
+    fn placement(&self, pi: &PlacedItem, g: f64) -> Result<Placement> {
+        let part = pi.item().external_id() as usize;
+        let ext = jagua_rs::io::export::int_to_ext_transformation(&pi.d_transf(), &pi.item().shape_orig().pre_transform);
+        if ext.reflected {
+            bail!("the solver returned a mirrored part although mirroring was not allowed");
+        }
+        let rot = f64::from(ext.rotation()).to_degrees();
+        let (tx, ty) = ext.translation();
+        // Result: R·(p − offset) + t − (g, g).
+        let r = Transform { rotation_deg: rot, translation: Pt::new(0.0, 0.0) }.apply(self.offsets[part]);
+        Ok(Placement {
+            part,
+            transform: Transform {
+                rotation_deg: snap_angle(rot, &self.angles),
+                translation: Pt::new(f64::from(tx) - r.x - g, f64::from(ty) - r.y - g),
+            },
+        })
+    }
+
+    /// Puts fillers into the free space of a finished sheet, leaving its parts where they are and
+    /// staying within `max_len`. `available[i]` is how many copies of part `i` may be added; it is
+    /// reduced by what was placed. Largest fillers first, each as often as it fits. Returns the
+    /// added placements.
+    fn insert_fillers(
+        &self,
+        placed: &[Placement],
+        available: &mut [usize],
+        params: &NestParams,
+        max_len: f64,
+        seed: u64,
+    ) -> Result<Vec<Placement>> {
+        let g = params.gap;
+        let mut counts = available.to_vec();
+        for p in placed {
+            counts[p.part] += 1;
+        }
+        let items: Vec<ExtItem> = counts
+            .iter()
+            .enumerate()
+            .filter(|&(i, &c)| c > 0 && self.items[i].is_some())
+            .map(|(i, &c)| ExtItem { base: self.items[i].clone().unwrap(), demand: c as u64 })
+            .collect();
+        let ext = ExtSPInstance { name: "fill".into(), min_item_separation: g as f32, items, strip_height: (params.width + 2.0 * g) as f32 };
+        let config = DEFAULT_SPARROW_CONFIG;
+        let importer = Importer::new(config.cde_config, config.poly_simpl_tolerance, config.narrow_concavity_cutoff_ratio);
+        let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).context("jagua-rs rejected the filler job")?;
+        let mut prob = SPProblem::new(instance)?;
+        // Same frame as `strip`: solver coordinates are sheet coordinates + (g, g).
+        prob.change_strip_width((max_len + 2.0 * g) as f32)?;
+
+        // The sheet as it is. Its parts may touch within f32 noise; only the fillers are checked.
+        for p in placed {
+            let idx = prob.instance().item_idx(p.part as u64).context("sheet part missing from the filler job")?;
+            let item = prob.instance().item(idx).clone();
+            let r = Transform { rotation_deg: p.transform.rotation_deg, translation: Pt::new(0.0, 0.0) }.apply(self.offsets[p.part]);
+            let t = (p.transform.translation.x + r.x + g, p.transform.translation.y + r.y + g);
+            let ext_t = DTransformation::new(p.transform.rotation_deg.to_radians() as f32, (t.0 as f32, t.1 as f32));
+            let d_transf = jagua_rs::io::import::ext_to_int_transformation(&ext_t, &item.shape_orig().pre_transform);
+            prob.place_item(SPPlacement { item_idx: idx, d_transf });
+        }
+
+        let mut order: Vec<usize> = (0..available.len()).filter(|&i| available[i] > 0 && self.items[i].is_some()).collect();
+        order.sort_by(|&a, &b| self.demands[b].part.shape.area().total_cmp(&self.demands[a].part.shape.area()));
+        let sample_config = SampleConfig { tilt: self.tilt, ..LBF_SAMPLE_CONFIG };
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        let mut added = Vec::new();
+        for part in order {
+            let Some(idx) = prob.instance().item_idx(part as u64) else { continue };
+            while available[part] > 0 {
+                let item = prob.instance().item(idx).clone();
+                let (best, _) = search_placement(prob.layout(), &item, None, LBFEvaluator::new(prob.layout(), &item), sample_config, &mut rng);
+                let Some((d_transf, SampleEval::Clear { .. })) = best else { break };
+                let pk = prob.place_item(SPPlacement { item_idx: idx, d_transf });
+                added.push(self.placement(&prob.layout().placed_items()[pk], g)?);
+                available[part] -= 1;
+            }
+        }
+        Ok(added)
     }
 }
 
@@ -564,10 +944,21 @@ fn snap_angle(rot: f64, allowed: &[f64]) -> f64 {
         .unwrap_or(rot)
 }
 
-fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, budget: Budget, seed: u64) -> Result<SPSolution> {
+/// Runs sparrow. Returns its final layout; with a tilt table, also every feasible layout found on the
+/// way (longer ones may be less tilted), for the caller to weigh length against tilt.
+fn run_sparrow(
+    ext: &ExtSPInstance,
+    names: &[&str],
+    params: &NestParams,
+    budget: Budget,
+    seed: u64,
+    tilt: Option<&'static TiltPenalty>,
+) -> Result<Vec<SPSolution>> {
     let mut config = DEFAULT_SPARROW_CONFIG;
     config.expl_cfg.separator_config.n_workers = params.workers.max(1);
     config.cmpr_cfg.separator_config.n_workers = params.workers.max(1);
+    config.expl_cfg.separator_config.sample_config.tilt = tilt;
+    config.cmpr_cfg.separator_config.sample_config.tilt = tilt;
     let cancel = params.cancel.clone().unwrap_or_default();
 
     let importer = Importer::new(config.cde_config, config.poly_simpl_tolerance, config.narrow_concavity_cutoff_ratio);
@@ -583,7 +974,7 @@ fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, budget:
         }
     };
     let rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-    let mut listener = ProgressListener;
+    let mut listener = ProgressListener { keep: tilt.is_some(), feasible: Vec::new() };
 
     match budget {
         Budget::Time(total) => {
@@ -601,13 +992,25 @@ fn run_sparrow(ext: &ExtSPInstance, names: &[&str], params: &NestParams, budget:
         }
     }
     .context("sparrow could not build a layout")
+    .map(|last| {
+        let mut all = listener.feasible;
+        all.push(last);
+        all
+    })
 }
 
-struct ProgressListener;
+struct ProgressListener {
+    /// Whether to keep the feasible layouts.
+    keep: bool,
+    feasible: Vec<SPSolution>,
+}
 
 impl SolutionListener for ProgressListener {
     fn report(&mut self, report: ReportType, solution: &SPSolution) {
         if matches!(report, ReportType::ExplFeas | ReportType::CmprFeas) {
+            if self.keep {
+                self.feasible.push(solution.clone());
+            }
             info!(
                 "[{}] feasible layout: length {:.1} mm, density {:.2}%",
                 if report == ReportType::ExplFeas { "explore" } else { "compress" },

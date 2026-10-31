@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/nest-core", "crates/nest-cli"]
+# Patched copy of sparrow (see vendor/sparrow/VENDORED.md); built only as a library dependency.
+exclude = ["vendor/sparrow"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +14,7 @@ license = "MIT"
 ctrlc = "3.5"
 jiff = "0.2"
 nest-core = { path = "crates/nest-core" }
-sparrow = { path = "../sparrow" }
+sparrow = { path = "vendor/sparrow" }
 jagua-rs = { version = "=1.1.0", features = ["spp"] }
 rand = "0.10"
 dxf = "0.6"
