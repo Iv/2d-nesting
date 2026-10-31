@@ -135,6 +135,18 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 (`*`, `?`, case-insensitive) as `<dir>/<block>.dxf` and writes `<dir>/parts.toml` with quantity 1
 and the insert count of each block as a comment.
 
+`nest extract-labelled <assembly.dxf> --headings TOP=top,BOT=bottom --out <dir>` is for parts that are
+not blocks but loose outlines with a label inside (panels such as `A16` under a heading `TOP COLOR 1`):
+each label's smallest closed contour becomes `<dir>/<section>_col<k>/<section>_<number><letter>.dxf`,
+grouped by drawing column (`--split-x` gives the column borders explicitly, `--region` limits the
+search). Each `parts.toml` asks for one right and one left (mirrored) copy of every panel.
+
+`nest extract-labelled <assembly.dxf> --headings TOP=top,BOT=bottom --out <dir>` is for parts that are
+not blocks but loose outlines with a label inside (panels such as `A16` under a heading `TOP COLOR 1`):
+each label's smallest closed contour becomes `<dir>/<section>_col<k>/<section>_<number><letter>.dxf`,
+grouped by drawing column (`--split-x` gives the column borders explicitly, `--region` limits the
+search). Each `parts.toml` asks for one right and one left (mirrored) copy of every panel.
+
 ## How sheets are filled
 
 sparrow solves strip packing: a strip of fixed width whose length it minimises. Sheets are filled on
