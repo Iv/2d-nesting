@@ -163,6 +163,11 @@ struct RunArgs {
     #[arg(long, default_value_t = 2.0)]
     strip_ratio: f64,
 
+    /// Parts smaller than this fraction of the largest part's area are small: sheets are made of
+    /// the other parts, small ones then go into holes, the rest at the end (0 = off)
+    #[arg(long, default_value_t = 0.0)]
+    small_parts: f64,
+
     /// How parts are distributed over sheets
     #[arg(long, value_enum, default_value_t = StrategyArg::Balanced)]
     strategy: StrategyArg,
@@ -281,6 +286,9 @@ fn extract_labelled(args: ExtractLabelledArgs) -> Result<()> {
 }
 
 fn run(cli: RunArgs) -> Result<bool> {
+    if !(0.0..1.0).contains(&cli.small_parts) {
+        bail!("--small-parts must be a fraction in [0, 1)");
+    }
     if !(cli.strip_ratio >= 1.0) {
         bail!("--strip-ratio must be at least 1");
     }
@@ -324,6 +332,7 @@ fn run(cli: RunArgs) -> Result<bool> {
         align_panels: cli.panel_axis == PanelAxis::Long,
         min_strip: cli.min_strip,
         strip_ratio: cli.strip_ratio,
+        small_parts: cli.small_parts,
         budget: match cli.iterations {
             Some(n) => Budget::Iterations(n),
             None => Budget::Time(Duration::from_secs_f64(cli.time_limit)),

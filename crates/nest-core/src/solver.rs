@@ -82,6 +82,10 @@ pub struct NestParams {
     /// How many times fabric saved at the end of a sheet is worth more than the same area left as a
     /// free strip on top: the strip counts as saved fabric divided by this. 1 = equally valuable.
     pub strip_ratio: f64,
+    /// A part whose outer area is below this fraction of the largest part's is small: sheets are
+    /// made of the other parts, and small parts then go into their holes (see [`nest_observed`]).
+    /// 0 turns this off.
+    pub small_parts: f64,
     pub budget: Budget,
     pub strategy: Strategy,
     /// 0: sheets are made once with the full budget. Otherwise this many quick drafts (each with
@@ -110,6 +114,7 @@ impl Default for NestParams {
             align_panels: true,
             min_strip: 150.0,
             strip_ratio: 2.0,
+            small_parts: 0.0,
             budget: Budget::Time(Duration::from_secs(60)),
             strategy: Strategy::Balanced,
             drafts: 0,
@@ -186,10 +191,16 @@ impl NestParams {
     /// `min_strip` tall. A laser cut can follow the parts there, and the fabric takes parts of other
     /// jobs; a hole between parts cannot. Like the top strip it is worth 1/`strip_ratio` of length.
     pub fn right_pocket(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> f64 {
+        self.right_pocket_bands(demands, placements, used_length).iter().map(|&(y0, y1, x)| (y1 - y0) * (used_length - x)).sum()
+    }
+
+    /// The free space of [`NestParams::right_pocket`] as horizontal bands `(y0, y1, x)`: free from
+    /// `x` to the used length.
+    fn right_pocket_bands(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> Vec<(f64, f64, f64)> {
         /// Height of the bands the sheet is scanned in, mm.
         const BAND: f64 = 5.0;
         if self.min_strip <= 0.0 || placements.is_empty() {
-            return 0.0;
+            return Vec::new();
         }
         let top = self.width - self.top_strip(demands, placements);
         let n = (top / BAND).ceil() as usize;
@@ -212,21 +223,42 @@ impl NestParams {
                 }
             }
         }
-        let (mut area, mut run_h, mut run_a) = (0.0, 0.0, 0.0);
+        let (mut bands, mut run) = (Vec::new(), Vec::new());
         for k in 0..=n {
-            let h = (top - k as f64 * BAND).min(BAND);
+            let y0 = k as f64 * BAND;
             let gap = if k < n { used_length - right[k] } else { 0.0 };
             if gap >= self.min_strip {
-                run_h += h;
-                run_a += gap * h;
+                run.push((y0, (y0 + BAND).min(top), right[k]));
             } else {
-                if run_h >= self.min_strip - 1e-6 {
-                    area += run_a;
+                if run.last().map_or(0.0, |r: &(f64, f64, f64)| r.1) - run.first().map_or(0.0, |r| r.0) >= self.min_strip - 1e-6 {
+                    bands.append(&mut run);
                 }
-                (run_h, run_a) = (0.0, 0.0);
+                run.clear();
             }
         }
-        area
+        bands
+    }
+
+    /// Reusable free space of a sheet as rectangles: the band on top and the space open to the right
+    /// end. Small parts going into holes are kept out of them.
+    fn reusable_regions(&self, demands: &[Demand], placements: &[Placement], used_length: f64) -> Vec<BBox> {
+        /// Neighbouring bands whose free space starts within this of each other make one rectangle, mm.
+        const MERGE: f64 = 20.0;
+        let mut out: Vec<BBox> = Vec::new();
+        for (y0, y1, x) in self.right_pocket_bands(demands, placements, used_length) {
+            match out.last_mut() {
+                Some(r) if (r.max.y - y0).abs() < 1e-6 && (r.min.x - x).abs() < MERGE => {
+                    r.max.y = y1;
+                    r.min.x = r.min.x.min(x);
+                }
+                _ => out.push(BBox { min: Pt::new(x, y0), max: Pt::new(used_length, y1) }),
+            }
+        }
+        let strip = self.top_strip(demands, placements);
+        if strip > 0.0 {
+            out.push(BBox { min: Pt::new(0.0, self.width - strip), max: Pt::new(used_length, self.width) });
+        }
+        out
     }
 
     /// Penalty of a part placed at `rotation_deg`, mm of length (0 for non-panels).
@@ -353,15 +385,25 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         observer(&Step { sheet, kind, placements: pl.to_vec(), used_length: len_of(pl), fits: fits(pl) });
     };
 
+    // Small parts and fillers are kept out until the sheets are made.
+    let largest = (0..demands.len()).filter(|&i| prep.items[i].is_some()).map(area).fold(0.0, f64::max);
+    let small: Vec<bool> = (0..demands.len()).map(|i| !demands[i].filler && area(i) < params.small_parts * largest).collect();
+    let placeable = |i: usize| prep.items[i].is_some() && !demands[i].filler;
+    let main: Vec<usize> = (0..demands.len()).map(|i| if placeable(i) && !small[i] { demands[i].qty } else { 0 }).collect();
+    let mut late: Vec<usize> = (0..demands.len()).map(|i| if placeable(i) && small[i] { demands[i].qty } else { 0 }).collect();
+    if late.iter().sum::<usize>() > 0 {
+        info!("{} small parts ({} copies) go into holes after the sheets are made", late.iter().filter(|&&n| n > 0).count(), late.iter().sum::<usize>());
+    }
+
     let mut sheets = if params.drafts == 0 {
-        make_sheets(demands, params, &prep, &mut next_seed, &mut report)?
+        make_sheets(demands, params, &prep, main.clone(), &mut next_seed, &mut report)?
     } else {
         // Quick drafts decide which parts go on which sheet; the best one is then polished, each
         // sheet nested again with the full budget and kept if that consumes less fabric.
         let draft_params = NestParams { budget: params.budget.share(1, DRAFT_SHARE), ..params.clone() };
         let mut best: Option<((usize, f64), Vec<Sheet>)> = None;
         for k in 1..=params.drafts {
-            let draft = make_sheets(demands, &draft_params, &prep, &mut next_seed, &mut |n, kind, pl| report(n, format!("draft{k} {kind}"), pl))?;
+            let draft = make_sheets(demands, &draft_params, &prep, main.clone(), &mut next_seed, &mut |n, kind, pl| report(n, format!("draft{k} {kind}"), pl))?;
             let score = (draft.len(), draft.iter().map(|s| sheet_cost(&s.placements)).sum::<f64>());
             info!("draft {k}: {} sheets, {:.1} mm", score.0, score.1);
             if best.as_ref().is_none_or(|b| score.0 < b.0.0 || (score.0 == b.0.0 && score.1 < b.0.1)) {
@@ -427,13 +469,20 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
         }
     }
 
+    if late.iter().sum::<usize>() > 0 {
+        place_small(demands, params, &prep, &mut sheets, &mut late, &mut next_seed, &mut report)?;
+    }
+    if small.iter().any(|&s| s) {
+        relocate_small(demands, params, &prep, &mut sheets, &small, &mut next_seed, &mut report)?;
+    }
+
     // Fillers go into the free space of the finished sheets, which stay as they are.
     let mut fillers: Vec<usize> = (0..demands.len()).map(|i| if prep.items[i].is_some() && demands[i].filler { demands[i].qty } else { 0 }).collect();
     for (n, sheet) in sheets.iter_mut().enumerate() {
         if fillers.iter().all(|&f| f == 0) {
             break;
         }
-        let added = prep.insert_fillers(&sheet.placements, &mut fillers, params, sheet.used_length, next_seed())?;
+        let added = prep.insert_fillers(&sheet.placements, &mut fillers, params, sheet.used_length, params.width, &[], next_seed())?;
         if !added.is_empty() {
             info!("sheet {}: {} fillers added", n + 1, added.len());
             sheet.placements.extend(added);
@@ -445,11 +494,12 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     Ok(NestOutcome { result: NestResult { sheets, unplaced }, seed, elapsed: started.elapsed() })
 }
 
-/// Fills sheets with all non-filler parts by the chosen strategy (see [`nest_observed`]).
+/// Fills sheets with `remaining[i]` copies of each part by the chosen strategy (see [`nest_observed`]).
 fn make_sheets(
     demands: &[Demand],
     params: &NestParams,
     prep: &Prepared,
+    mut remaining: Vec<usize>,
     next_seed: &mut dyn FnMut() -> u64,
     report: &mut dyn FnMut(usize, String, &[Placement]),
 ) -> Result<Vec<Sheet>> {
@@ -467,9 +517,6 @@ fn make_sheets(
     let worth = |c: usize, before: &[Placement], after: &[Placement]| {
         fits(after) && len_of(after) - len_of(before) <= area(c) / (params.width * TARGET_DENSITY) + eps
     };
-    // Fillers are kept out until all sheets are made.
-    let mut remaining: Vec<usize> =
-        (0..demands.len()).map(|i| if prep.items[i].is_some() && !demands[i].filler { demands[i].qty } else { 0 }).collect();
     let mut sheets: Vec<Sheet> = Vec::new();
 
     if params.strategy == Strategy::Balanced && remaining.iter().sum::<usize>() > 0 {
@@ -630,6 +677,157 @@ fn make_sheets(
         sheets.push(Sheet { width: params.width, length: params.length, used_length: len_of(&chosen), placements: chosen });
     }
     Ok(sheets)
+}
+
+/// Puts the small parts (`left[i]` copies of part `i`) on the finished sheets, largest first:
+/// 1. into a hole of some sheet where it costs no fabric (the free band on top stays free and the
+///    consumed fabric does not grow), the last sheet tried first;
+/// 2. else where it costs least, if that is less than the length it would add at the end;
+/// 3. whatever is left is nested together with the last sheet, or onto further sheets.
+fn place_small(
+    demands: &[Demand],
+    params: &NestParams,
+    prep: &Prepared,
+    sheets: &mut Vec<Sheet>,
+    left: &mut [usize],
+    next_seed: &mut dyn FnMut() -> u64,
+    report: &mut dyn FnMut(usize, String, &[Placement]),
+) -> Result<()> {
+    let eps = 1e-6;
+    let area = |i: usize| demands[i].part.shape.area();
+    let cost = |pl: &[Placement]| sheet_cost(demands, params, pl);
+    let mut order: Vec<usize> = (0..left.len()).filter(|&i| left[i] > 0).collect();
+    order.sort_by(|&a, &b| area(b).total_cmp(&area(a)));
+    for c in order {
+        while left[c] > 0 {
+            // Length the part would add at the end of a sheet.
+            let at_end = area(c) / (params.width * TARGET_DENSITY);
+            let mut best: Option<(f64, usize, Placement)> = None;
+            for pass in [1, 2] {
+                for n in (0..sheets.len()).rev() {
+                    let sheet = &sheets[n];
+                    let blocked = if pass == 1 { params.reusable_regions(demands, &sheet.placements, sheet.used_length) } else { Vec::new() };
+                    let mut one = vec![0usize; demands.len()];
+                    one[c] = 1;
+                    let Some(p) = prep.insert_fillers(&sheet.placements, &mut one, params, sheet.used_length, params.width, &blocked, next_seed())?.pop() else {
+                        continue;
+                    };
+                    let mut after = sheet.placements.clone();
+                    after.push(p.clone());
+                    let delta = cost(&after) - cost(&sheet.placements);
+                    let ok = if pass == 1 { delta <= eps } else { delta < at_end };
+                    if ok && best.as_ref().is_none_or(|b| delta < b.0 - eps) {
+                        best = Some((delta, n, p));
+                        if pass == 1 {
+                            break;
+                        }
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+            let Some((delta, n, p)) = best else { break };
+            info!("{}: into a hole on sheet {} (+{delta:.1} mm)", demands[c].part.name, n + 1);
+            sheets[n].placements.push(p);
+            report(n + 1, format!("small +{}", demands[c].part.name), &sheets[n].placements);
+            left[c] -= 1;
+        }
+    }
+    if left.iter().sum::<usize>() == 0 {
+        return Ok(());
+    }
+
+    // The rest: nested together with the last sheet if that still fits, else onto new sheets.
+    let last = sheets.len() - 1;
+    let mut counts = left.to_vec();
+    for p in &sheets[last].placements {
+        counts[p.part] += 1;
+    }
+    let trial = prep.strip(&counts, params, params.length, params.budget, next_seed())?;
+    report(last + 1, "small at the end".into(), &trial);
+    let len = trial.iter().map(|p| demands[p.part].part.shape.transformed(&p.transform).bbox().max.x).fold(0.0, f64::max);
+    if len <= params.length + eps && trial.len() == counts.iter().sum::<usize>() {
+        info!("{} small parts nested with the last sheet", left.iter().sum::<usize>());
+        let mut pl = trial;
+        crate::compact::slide(demands, &mut pl, params.gap);
+        sheets[last].used_length = len_of(demands, &pl);
+        sheets[last].placements = pl;
+    } else {
+        info!("{} small parts go onto further sheets", left.iter().sum::<usize>());
+        sheets.extend(make_sheets(demands, params, prep, left.to_vec(), next_seed, report)?);
+    }
+    left.iter_mut().for_each(|n| *n = 0);
+    Ok(())
+}
+
+/// Moves small parts between finished sheets: a part is taken off its sheet (whose parts then slide
+/// left and down) and put into a hole of another sheet, the last one tried first, if the fabric
+/// consumed by both sheets together goes down: a wider free band on top, a shorter sheet.
+fn relocate_small(
+    demands: &[Demand],
+    params: &NestParams,
+    prep: &Prepared,
+    sheets: &mut [Sheet],
+    small: &[bool],
+    next_seed: &mut dyn FnMut() -> u64,
+    report: &mut dyn FnMut(usize, String, &[Placement]),
+) -> Result<()> {
+    let eps = 1e-6;
+    let cost = |pl: &[Placement]| sheet_cost(demands, params, pl);
+    let area = |i: usize| demands[i].part.shape.area();
+    for i in 0..sheets.len() {
+        // Smallest first: they are the likeliest to find a hole elsewhere.
+        let mut k = 0;
+        loop {
+            let mut cands: Vec<usize> = (0..sheets[i].placements.len()).filter(|&k| small[sheets[i].placements[k].part]).collect();
+            cands.sort_by(|&a, &b| area(sheets[i].placements[a].part).total_cmp(&area(sheets[i].placements[b].part)));
+            let Some(&pk) = cands.get(k) else { break };
+            let c = sheets[i].placements[pk].part;
+            let mut without = sheets[i].placements.clone();
+            without.remove(pk);
+            crate::compact::slide(demands, &mut without, params.gap);
+            let gain = cost(&sheets[i].placements) - cost(&without);
+            let mut moved = false;
+            if gain > eps {
+                for j in (0..sheets.len()).rev().filter(|&j| j != i) {
+                    let blocked = params.reusable_regions(demands, &sheets[j].placements, sheets[j].used_length);
+                    let mut one = vec![0usize; demands.len()];
+                    one[c] = 1;
+                    let Some(p) = prep.insert_fillers(&sheets[j].placements, &mut one, params, sheets[j].used_length, params.width, &blocked, next_seed())?.pop() else {
+                        continue;
+                    };
+                    let mut with = sheets[j].placements.clone();
+                    with.push(p);
+                    if cost(&with) - cost(&sheets[j].placements) < gain - eps {
+                        info!("{}: moved from sheet {} to sheet {} ({:.1} mm less)", demands[c].part.name, i + 1, j + 1, gain - (cost(&with) - cost(&sheets[j].placements)));
+                        sheets[j].placements = with;
+                        report(j + 1, format!("moved in {}", demands[c].part.name), &sheets[j].placements);
+                        sheets[i].used_length = len_of(demands, &without);
+                        sheets[i].placements = without;
+                        report(i + 1, format!("moved out {}", demands[c].part.name), &sheets[i].placements);
+                        moved = true;
+                        break;
+                    }
+                }
+            }
+            if !moved {
+                k += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Used length of a layout: the rightmost point of any part.
+fn len_of(demands: &[Demand], pl: &[Placement]) -> f64 {
+    pl.iter().map(|p| demands[p.part].part.shape.transformed(&p.transform).bbox().max.x).fold(0.0, f64::max)
+}
+
+/// Fabric a sheet consumes plus the tilt penalty, mm: what the polishing passes minimise.
+fn sheet_cost(demands: &[Demand], params: &NestParams, pl: &[Placement]) -> f64 {
+    let tilt: f64 = pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum();
+    params.consumed(demands, pl, len_of(demands, pl)) + tilt
 }
 
 /// Solver-ready items: one per demand, `None` for parts that fit the sheet at no allowed angle.
@@ -803,8 +1001,9 @@ impl Prepared<'_> {
         })
     }
 
-    /// Puts fillers into the free space of a finished sheet, leaving its parts where they are and
-    /// staying within `max_len`. `available[i]` is how many copies of part `i` may be added; it is
+    /// Puts fillers into the free space of a finished sheet, leaving its parts where they are,
+    /// staying within `max_len` and below `height` and out of the `blocked` rectangles.
+    /// `available[i]` is how many copies of part `i` may be added; it is
     /// reduced by what was placed. Largest fillers first, each as often as it fits. Returns the
     /// added placements.
     fn insert_fillers(
@@ -813,6 +1012,8 @@ impl Prepared<'_> {
         available: &mut [usize],
         params: &NestParams,
         max_len: f64,
+        height: f64,
+        blocked: &[BBox],
         seed: u64,
     ) -> Result<Vec<Placement>> {
         let g = params.gap;
@@ -820,13 +1021,27 @@ impl Prepared<'_> {
         for p in placed {
             counts[p.part] += 1;
         }
-        let items: Vec<ExtItem> = counts
+        let mut items: Vec<ExtItem> = counts
             .iter()
             .enumerate()
             .filter(|&(i, &c)| c > 0 && self.items[i].is_some())
             .map(|(i, &c)| ExtItem { base: self.items[i].clone().unwrap(), demand: c as u64 })
             .collect();
-        let ext = ExtSPInstance { name: "fill".into(), min_item_separation: g as f32, items, strip_height: (params.width + 2.0 * g) as f32 };
+        // Blocked rectangles are items of their own (ids after the parts), placed where they are.
+        let blocker_id = |k: usize| (self.demands.len() + k) as u64;
+        for (k, b) in blocked.iter().enumerate() {
+            let (w, h) = (b.width() as f32, b.height() as f32);
+            items.push(ExtItem {
+                base: BaseItem {
+                    id: blocker_id(k),
+                    orientation: ExtOrientation { rotation: ExtRotation::Discrete { angles: vec![0.0] }, reflection_axes: vec![] },
+                    shape: ExtShape::SimplePolygon(ExtSPolygon(vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])),
+                    min_quality: None,
+                },
+                demand: 1,
+            });
+        }
+        let ext = ExtSPInstance { name: "fill".into(), min_item_separation: g as f32, items, strip_height: (height + 2.0 * g) as f32 };
         let config = DEFAULT_SPARROW_CONFIG;
         let importer = Importer::new(config.cde_config, config.poly_simpl_tolerance, config.narrow_concavity_cutoff_ratio);
         let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext).context("jagua-rs rejected the filler job")?;
@@ -841,6 +1056,13 @@ impl Prepared<'_> {
             let r = Transform { rotation_deg: p.transform.rotation_deg, translation: Pt::new(0.0, 0.0) }.apply(self.offsets[p.part]);
             let t = (p.transform.translation.x + r.x + g, p.transform.translation.y + r.y + g);
             let ext_t = DTransformation::new(p.transform.rotation_deg.to_radians() as f32, (t.0 as f32, t.1 as f32));
+            let d_transf = jagua_rs::io::import::ext_to_int_transformation(&ext_t, &item.shape_orig().pre_transform);
+            prob.place_item(SPPlacement { item_idx: idx, d_transf });
+        }
+        for (k, b) in blocked.iter().enumerate() {
+            let idx = prob.instance().item_idx(blocker_id(k)).context("blocker missing from the filler job")?;
+            let item = prob.instance().item(idx).clone();
+            let ext_t = DTransformation::new(0.0, ((b.min.x + g) as f32, (b.min.y + g) as f32));
             let d_transf = jagua_rs::io::import::ext_to_int_transformation(&ext_t, &item.shape_orig().pre_transform);
             prob.place_item(SPPlacement { item_idx: idx, d_transf });
         }

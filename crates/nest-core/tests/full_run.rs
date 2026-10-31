@@ -330,6 +330,27 @@ fn fillers_go_into_free_space_only() {
 }
 
 #[test]
+fn small_parts_are_placed_last_and_all_of_them() {
+    let input = job_dir();
+    let mm = dxf::enums::Units::Millimeters;
+    save(input.path(), "chip", mm, vec![on("CUT", rect(0.0, 0.0, 30.0, 20.0))]);
+    let manifest = fs::read_to_string(input.path().join("parts.toml")).unwrap() + "chip = 12\n";
+    fs::write(input.path().join("parts.toml"), manifest).unwrap();
+    let p = NestParams { width: 700.0, length: 900.0, small_parts: 0.05, ..params(2.0, vec![0.0, 90.0, 180.0, 270.0], 5) };
+
+    let out = tempfile::tempdir().unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
+    assert!(job.valid(), "{}", job.report);
+    let r = &job.outcome.result;
+    assert!(r.unplaced.is_empty());
+    // Every copy of every part is placed, the small chips included.
+    for (i, d) in job.demands.iter().enumerate() {
+        let n = r.sheets.iter().flat_map(|s| &s.placements).filter(|pl| pl.part == i).count();
+        assert_eq!(n, d.qty, "{}", d.part.name);
+    }
+}
+
+#[test]
 fn free_space_at_the_right_end_counts_less_than_a_hole() {
     use nest_core::geom::{Demand, Part, Placement, Pt, Shape, Transform};
     let rect = |w: f64, h: f64| Shape::new(vec![Pt::new(0.0, 0.0), Pt::new(w, 0.0), Pt::new(w, h), Pt::new(0.0, h)], vec![]);
