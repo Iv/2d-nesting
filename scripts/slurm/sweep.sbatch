@@ -3,6 +3,8 @@
 #
 #   sbatch --array=1-64 scripts/slurm/sweep.sbatch <input dir> [extra nest options...]
 #
+# NEST=<path> picks another build (e.g. one made with CARGO_TARGET_DIR while older jobs still run).
+#
 # Results: runs/sweep_<array job id>/seed_<task id>/; summarise with scripts/sweep_summary.py.
 #SBATCH --job-name=nest-sweep
 #SBATCH --partition=main
@@ -18,4 +20,4 @@ seed="${SLURM_ARRAY_TASK_ID:-1}"
 out="runs/sweep_${SLURM_ARRAY_JOB_ID:-local}/seed_${seed}"
 mkdir -p "$out"
 # The worker count must match --cpus-per-task, and stay fixed for comparable runs.
-./target/release/nest run "$input" -o "$out" -s "$seed" -w "${SLURM_CPUS_PER_TASK:-3}" "$@"
+"${NEST:-./target/release/nest}" run "$input" -o "$out" -s "$seed" -w "${SLURM_CPUS_PER_TASK:-3}" "$@"
