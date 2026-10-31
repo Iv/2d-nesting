@@ -101,21 +101,22 @@ pub fn run_with_fillers(
         dxf_out::write_svg(&path.with_extension("svg"), &demands, sheet)?;
         sheet_files.push(path);
     }
-    write_overview(&out_dir.join("index.html"), &outcome, &validations)?;
     let report = report::render(&demands, params, &outcome, &validations);
     let report_path = out_dir.join("report.txt");
     fs::write(&report_path, &report).with_context(|| format!("{}: cannot write", report_path.display()))?;
+    write_overview(&out_dir.join("index.html"), &outcome, &validations, &report)?;
 
     Ok(JobOutput { demands, outcome, validations, report, sheet_files })
 }
 
-/// A page showing all sheet previews one under another, to look through a whole job at once.
-fn write_overview(path: &Path, outcome: &NestOutcome, validations: &[Validation]) -> Result<()> {
+/// A page showing all sheet previews one under another and the report below them, to look through
+/// a whole job at once.
+fn write_overview(path: &Path, outcome: &NestOutcome, validations: &[Validation], report: &str) -> Result<()> {
     use std::fmt::Write as _;
     let mut h = String::from(
         "<!doctype html><meta charset='utf-8'><title>Nesting</title>\
          <style>body{font-family:sans-serif;margin:16px;background:#f4f4f4}.sheet{background:#fff;border:1px solid #999;line-height:0}\
-         h2{font-size:15px;margin:18px 0 6px}</style>",
+         h2{font-size:15px;margin:18px 0 6px}pre{background:#fff;border:1px solid #999;padding:8px;overflow-x:auto}</style>",
     );
     for (i, s) in outcome.result.sheets.iter().enumerate() {
         let ok = validations.get(i).is_some_and(Validation::ok);
@@ -133,5 +134,7 @@ fn write_overview(path: &Path, outcome: &NestOutcome, validations: &[Validation]
                 .replacen("<svg ", "<svg style='width:100%;height:auto' ", 1)
         );
     }
+    let escaped = report.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let _ = write!(h, "<h2>Report</h2><pre>{escaped}</pre>");
     fs::write(path, h).with_context(|| format!("{}: cannot write", path.display()))
 }

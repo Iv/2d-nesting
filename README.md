@@ -47,7 +47,7 @@ Output in `runs/<input>_<date>_<time>/` (or `--out`):
 |---|---|
 | `sheet_N.dxf` | one DXF per sheet: layer `SHEET` (sheet rectangle) and every part as an `INSERT` of a block holding its source drawing unchanged (own layers, labels, marks; left copies are the same block mirrored). With `--outlines`: traced contours on layer `PARTS` and a large part name on `LABELS` instead |
 | `sheet_N.svg` | preview of the sheet |
-| `index.html` | all previews on one page |
+| `index.html` | all previews on one page, the report below them |
 | `report.txt` | the report that is also printed to the console |
 | `steps/` | SVG of every intermediate layout (strip, repairs, probes, final sheet) |
 | `command.txt` | the command line of the run |
