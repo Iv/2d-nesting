@@ -113,7 +113,6 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 | `--panel-axis` | long | panel grain: `long` (along the long axis) or `drawn` (drawing X axis) |
 | `--min-strip` | 150 | a free strip on top, or free space open to the right end, at least this wide, mm, is reusable; 0 = off |
 | `--strip-ratio` | 2 | fabric saved at the end is worth this many times the same area of free strip or space at the right end |
-| `--small-parts` | 0 | parts below this fraction of the largest part's area are small: they go into holes after the sheets are made; 0 = off |
 | `--fillers` | – | folder of filler parts for free space; may be repeated |
 | `--outlines` | – | sheet DXF with traced contours and large name labels instead of the source drawings as blocks (for checking layouts) |
 | `--strategy` | balanced | how parts are distributed over sheets: `balanced` or `greedy` |
@@ -232,22 +231,6 @@ The solver only shortens the strip, so it has no reason to close a hole that doe
 sheet shorter. When the sheets are made, every part slides left, then down, as far as the sheet
 edges and the other parts (at the gap) allow, a few rounds, on the exact geometry. Free space gathers
 at the right end and along the top, where it counts as reusable; the sheet never gets longer.
-
-### Small parts last
-
-A small part squeezed onto a sheet during nesting costs nothing there but can spoil the free strip on
-top, while a hole on another sheet would take it for free. With `--small-parts f` every part whose
-area is below f times the largest part's is left out while the sheets are made. Then, largest first,
-each small part goes
-
-1. into a hole of some sheet where it costs no fabric: the free strip on top and the free space at
-   the right end stay free (the last sheet is tried first);
-2. else where it costs least, if that is less than the length it would add at the end of a sheet;
-3. else it is nested together with the last sheet, or onto further sheets if that does not fit.
-
-Afterwards each small part is taken off its sheet in turn (the rest of the sheet slides left and
-down) and put into a hole of another sheet, the last one first, if the two sheets then consume less
-fabric together.
 
 ### Fillers
 
