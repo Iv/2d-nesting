@@ -13,6 +13,9 @@ than holes in the middle, left panels as mirrored right ones. Most of these rule
 penalties in a few places (see [How sheets are filled](#how-sheets-are-filled)), so adapting it to
 another kind of part with other priorities should not be hard.
 
+It was written for and is used in production at [ASA Paragliding](https://asa-paragliding.ru), a
+paraglider manufacturer.
+
 On real gliders the parts consistently take 84 % or more of the fabric used, and up to 92 % in
 some cases (see the examples below).
 
