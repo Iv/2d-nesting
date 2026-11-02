@@ -29,7 +29,7 @@ array job runs 32 seeds at once and the best layout is picked afterwards (see
 [Seed sweeps on a slurm cluster](#seed-sweeps-on-a-slurm-cluster)): a whole glider takes as long as
 its slowest run.
 
-Example layouts for a real glider (Tayran 6, size 29), with DXF, SVG and reports:
+Example layouts for a real glider (Tayran 6, size 29, an earlier ASA model), with DXF, SVG and reports:
 [`examples/`](examples/README.md).
 
 - One part per DXF file, quantities from a small manifest.

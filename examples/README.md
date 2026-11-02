@@ -1,6 +1,7 @@
 # Examples
 
-Layouts made by `nest run` for a real paraglider: Tayran 6, size 29. Sheet (laser table)
+Layouts made by `nest run` for a real paraglider: Tayran 6, size 29, one of the earlier models of
+[ASA Paragliding](https://asa-paragliding.ru). Sheet (laser table)
 1560 × 5800 mm, gap 3 mm, rotations 0/90/180/270° ± 10° in steps of 2°, 120 s per sheet,
 `--drafts 6`. Each layout is the best of 32 seeds on a slurm cluster.
 
