@@ -1,0 +1,118 @@
+Nesting report
+==============
+Sheet size:          1560 x 5800 mm
+Gap between parts:   3 mm
+Allowed angles:      0°, 90°, 180°, 270° ± 10° (step 2°)
+Panel tilt limit:    3°
+Panel tilt penalty:  10 · d² mm (panels: names containing top, bot; straight = along the long axis)
+Search budget:       time 120 s, seed 5, workers 3
+Run time:            2492.2 s
+
+Sheet 1
+  Parts on sheet:     9
+  Parts area:         6.4819 m² (by outer contour)
+  Used length:        4927.2 of 5800 mm
+  Free at right end:  0.259 m² (reusable, not counted as used)
+  Utilisation:        71.64% of the sheet, 84.33% of the used length
+  validation passed: 9 parts, 15 pairs checked
+
+Sheet 2
+  Parts on sheet:     10
+  Parts area:         7.3704 m² (by outer contour)
+  Used length:        5667.6 of 5800 mm
+  Free at right end:  0.377 m² (reusable, not counted as used)
+  Utilisation:        81.46% of the sheet, 83.36% of the used length
+  validation passed: 10 parts, 16 pairs checked
+
+Sheet 3
+  Parts on sheet:     10
+  Parts area:         7.1178 m² (by outer contour)
+  Used length:        5408.0 of 5800 mm
+  Free at right end:  0.077 m² (reusable, not counted as used)
+  Utilisation:        78.67% of the sheet, 84.37% of the used length
+  validation passed: 10 parts, 19 pairs checked
+
+Sheet 4
+  Parts on sheet:     10
+  Parts area:         6.9976 m² (by outer contour)
+  Used length:        5280.1 of 5800 mm
+  Free at right end:  0.138 m² (reusable, not counted as used)
+  Utilisation:        77.34% of the sheet, 84.95% of the used length
+  validation passed: 10 parts, 17 pairs checked
+
+Sheet 5
+  Parts on sheet:     11
+  Parts area:         7.2764 m² (by outer contour)
+  Used length:        5470.4 of 5800 mm
+  Free at right end:  0.098 m² (reusable, not counted as used)
+  Utilisation:        80.42% of the sheet, 85.27% of the used length
+  validation passed: 11 parts, 20 pairs checked
+
+Sheet 6
+  Parts on sheet:     11
+  Parts area:         7.2764 m² (by outer contour)
+  Used length:        5480.3 of 5800 mm
+  Free at right end:  0.066 m² (reusable, not counted as used)
+  Utilisation:        80.42% of the sheet, 85.11% of the used length
+  validation passed: 11 parts, 24 pairs checked
+
+Sheet 7
+  Parts on sheet:     11
+  Parts area:         7.1130 m² (by outer contour)
+  Used length:        5306.9 of 5800 mm
+  Free at right end:  0.222 m² (reusable, not counted as used)
+  Utilisation:        78.61% of the sheet, 85.92% of the used length
+  validation passed: 11 parts, 22 pairs checked
+
+Sheet 8
+  Parts on sheet:     11
+  Parts area:         7.3565 m² (by outer contour)
+  Used length:        5550.0 of 5800 mm
+  Free at right end:  0.201 m² (reusable, not counted as used)
+  Utilisation:        81.31% of the sheet, 84.97% of the used length
+  validation passed: 11 parts, 19 pairs checked
+
+Sheet 9
+  Parts on sheet:     7
+  Parts area:         3.7820 m² (by outer contour)
+  Used length:        2883.1 of 5800 mm
+  Free at right end:  0.229 m² (reusable, not counted as used)
+  Utilisation:        41.80% of the sheet, 84.09% of the used length
+  validation passed: 7 parts, 8 pairs checked
+
+Total
+  Sheets:             9
+  Fabric used:        45.974 m (sum of the used lengths, each sheet cut straight)
+  Fabric consumed:    45.439 m (less free strips on top and space open to the right end, at least 150 mm, valued at 1/2)
+  Parts area:         60.7720 m²
+  Utilisation:        84.74% of the used fabric
+  Lower bound:        38.956 m of fabric, 6.72 sheets (by area)
+
+Placed parts:   90
+Unplaced parts: 0
+
+Parts:
+  part       qty     area, mm²      net, mm²   inner
+  rib1         2     1037462.1      795691.1      64
+  rib10        4      848594.3      652557.1      58
+  rib11        4      803957.3      667992.3      61
+  rib12        4      754108.3      580863.8      58
+  rib13        4      700166.8      539903.8      60
+  rib14        4      642823.6      535312.2      59
+  rib15        4      583232.9      486198.8      52
+  rib16        4      522614.4      436207.2      52
+  rib17        4      462424.2      386531.8      52
+  rib18        4      402551.6      337146.2      52
+  rib19        4      339660.0      264632.8      46
+  rib2         4     1037462.1      860023.2      59
+  rib20        4      280407.2      242258.5      48
+  rib21        4      220656.8      180575.6      47
+  rib22        4      162179.4      132343.2      45
+  rib23        4       97076.5       84869.4      45
+  rib3         4     1035204.0      793979.8      60
+  rib4         4     1023692.2      785261.5      58
+  rib5         4     1005040.8      833375.0      61
+  rib6         4      982869.1      754336.5      58
+  rib7         4      956413.6      734292.8      60
+  rib8         4      924601.2      767237.7      59
+  rib9         4      888525.0      682835.8      60

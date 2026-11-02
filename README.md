@@ -5,6 +5,17 @@ fixed-size sheets of fabric. DXF in, DXF out. Written in Rust; the packing engin
 [sparrow](https://github.com/JeroenGar/sparrow) on top of
 [jagua-rs](https://github.com/JeroenGar/jagua-rs).
 
+This is not a general-purpose library for nesting anything onto anything. It is a specialised tool
+for one job: laying out the large parts of paragliders (ribs, top and bottom panels) on fabric for
+laser cutting. What it optimises follows from that job: panels kept along the grain, fabric saved
+at the end of a sheet worth more than a free strip along the top, a straight right edge rather
+than holes in the middle, left panels as mirrored right ones. Most of these rules are weights and
+penalties in a few places (see [How sheets are filled](#how-sheets-are-filled)), so adapting it to
+another kind of part with other priorities should not be hard.
+
+Example layouts for a real glider (Tayran 6, size 29), with DXF, SVG and reports:
+[`examples/`](examples/README.md).
+
 - One part per DXF file, quantities from a small manifest.
 - Parts are nested by their **outer contour**; everything inside (holes, cut-outs, marks,
   open lines) travels with the part into the output.

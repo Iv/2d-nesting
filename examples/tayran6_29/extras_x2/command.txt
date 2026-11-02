@@ -1,0 +1,1 @@
+./target/release/nest run out/tayran6_29/extras_x2 -o runs/sweep_5317/seed_5 -s 5 -w 3 -g 3 --rotation-tolerance 10 --rotation-step 2 -t 120 --drafts 6

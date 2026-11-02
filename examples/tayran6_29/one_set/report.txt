@@ -1,0 +1,125 @@
+Nesting report
+==============
+Sheet size:          1560 x 5800 mm
+Gap between parts:   3 mm
+Allowed angles:      0°, 90°, 180°, 270° ± 10° (step 2°)
+Panel tilt limit:    3°
+Panel tilt penalty:  10 · d² mm (panels: names containing top, bot; straight = along the long axis)
+Search budget:       time 120 s, seed 11, workers 3
+Run time:            1485.6 s
+
+Sheet 1
+  Parts on sheet:     20
+  Parts area:         7.5092 m² (by outer contour)
+  Used length:        5575.6 of 5800 mm
+  Utilisation:        82.99% of the sheet, 86.33% of the used length
+  validation passed: 20 parts, 41 pairs checked
+
+Sheet 2
+  Parts on sheet:     20
+  Parts area:         7.5041 m² (by outer contour)
+  Used length:        5508.5 of 5800 mm
+  Utilisation:        82.94% of the sheet, 87.33% of the used length
+  validation passed: 20 parts, 46 pairs checked
+
+Sheet 3
+  Parts on sheet:     20
+  Parts area:         7.4774 m² (by outer contour)
+  Used length:        5462.3 of 5800 mm
+  Utilisation:        82.64% of the sheet, 87.75% of the used length
+  validation passed: 20 parts, 43 pairs checked
+
+Sheet 4
+  Parts on sheet:     19
+  Parts area:         7.2309 m² (by outer contour)
+  Used length:        5347.5 of 5800 mm
+  Utilisation:        79.92% of the sheet, 86.68% of the used length
+  validation passed: 19 parts, 38 pairs checked
+
+Sheet 5
+  Parts on sheet:     19
+  Parts area:         7.2161 m² (by outer contour)
+  Used length:        5340.0 of 5800 mm
+  Free at right end:  0.054 m² (reusable, not counted as used)
+  Utilisation:        79.75% of the sheet, 86.62% of the used length
+  validation passed: 19 parts, 38 pairs checked
+
+Sheet 6
+  Parts on sheet:     19
+  Parts area:         7.2275 m² (by outer contour)
+  Used length:        5317.0 of 5800 mm
+  Utilisation:        79.88% of the sheet, 87.13% of the used length
+  validation passed: 19 parts, 39 pairs checked
+
+Total
+  Sheets:             6
+  Fabric used:        32.551 m (sum of the used lengths, each sheet cut straight)
+  Fabric consumed:    32.534 m (less free strips on top and space open to the right end, at least 150 mm, valued at 1/2)
+  Parts area:         44.1651 m²
+  Utilisation:        86.97% of the used fabric
+  Lower bound:        28.311 m of fabric, 4.88 sheets (by area)
+
+Placed parts:   117
+Unplaced parts: 0
+
+Parts:
+  part       qty     area, mm²      net, mm²   inner
+  ka10         2      142965.1      142965.1      10
+  ka11         2      136726.8      136726.8      10
+  ka12         2      129789.9      129789.9      10
+  ka13         2      122518.9      122518.9      10
+  ka14         2      114146.8      114146.8      10
+  ka15         2      104331.4      104331.4      10
+  ka16         2       94423.4       94423.4      10
+  ka17         2       84449.1       84449.1      10
+  ka18         2       74036.0       74036.0      10
+  ka19         2       64586.9       64586.9      10
+  ka2          2      207894.2      207894.2      11
+  ka3          2      167463.7      167463.7      10
+  ka4          2      166309.3      166309.3      10
+  ka5          2      164179.2      164179.2      10
+  ka6          2      161228.8      161228.8      10
+  ka7          2      157815.8      157815.8      10
+  ka8          2      153624.7      153624.7      10
+  ka9          2      148610.6      148610.6      10
+  kb11         2      262965.6      262965.6       9
+  kb12         2      255006.6      255006.6       9
+  kb14         2      221886.0      221886.0       9
+  kb2          2      315137.1      315137.1       9
+  kb3          2      320880.8      320880.8       9
+  kb5          2      313209.5      313209.5       9
+  kb6          2      311657.5      311657.5       9
+  kb8          2      293609.3      293609.3       9
+  kb9          2      288543.4      288543.4       9
+  kc11         2      199432.1      199432.1       8
+  kc12         2      192646.2      192646.2       8
+  kc14         2      173817.4      173817.4       8
+  kc2          2      224101.2      224101.2       8
+  kc3          2      233426.1      233426.1       8
+  kc5          2      229068.2      229068.2       8
+  kc6          2      227822.4      227822.4       8
+  kc8          2      217689.2      217689.2       8
+  kc9          2      213554.8      213554.8       8
+  rib1         1     1037462.1      795691.1      64
+  rib10        2      848594.3      652557.1      58
+  rib11        2      803957.3      667992.3      61
+  rib12        2      754108.3      580863.8      58
+  rib13        2      700166.8      539903.8      60
+  rib14        2      642823.6      535312.2      59
+  rib15        2      583232.9      486198.8      52
+  rib16        2      522614.4      436207.2      52
+  rib17        2      462424.2      386531.8      52
+  rib18        2      402551.6      337146.2      52
+  rib19        2      339660.0      264632.8      46
+  rib2         2     1037462.1      860023.2      59
+  rib20        2      280407.2      242258.5      48
+  rib21        2      220656.8      180575.6      47
+  rib22        2      162179.4      132343.2      45
+  rib23        2       97076.5       84869.4      45
+  rib3         2     1035204.0      793979.8      60
+  rib4         2     1023692.2      785261.5      58
+  rib5         2     1005040.8      833375.0      61
+  rib6         2      982869.1      754336.5      58
+  rib7         2      956413.6      734292.8      60
+  rib8         2      924601.2      767237.7      59
+  rib9         2      888525.0      682835.8      60
