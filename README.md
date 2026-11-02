@@ -16,6 +16,16 @@ another kind of part with other priorities should not be hard.
 On real gliders the parts consistently take 84 % or more of the fabric used, and up to 92 % in
 some cases (see the examples below).
 
+Typical times, one run with 3 threads and the usual budget of 120 s per sheet (`-t 120`): a sheet
+takes 2–4 minutes, a 5-sheet layout 10–15 minutes, a 6-sheet set of ribs about 13 minutes
+(`--strategy balanced`; `greedy` takes 1.2–1.8 times longer). A run needs 25–45 MB of memory.
+
+The work parallelises well: each run uses several threads (`-w`), and runs with different seeds
+are independent, so a seed sweep spreads over as many cores as there are. On a slurm cluster one
+array job runs 32 seeds at once and the best layout is picked afterwards (see
+[Seed sweeps on a slurm cluster](#seed-sweeps-on-a-slurm-cluster)): a whole glider takes as long as
+its slowest run.
+
 Example layouts for a real glider (Tayran 6, size 29), with DXF, SVG and reports:
 [`examples/`](examples/README.md).
 
