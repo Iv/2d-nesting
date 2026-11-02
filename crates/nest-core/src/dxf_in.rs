@@ -74,6 +74,7 @@ pub fn read_part(path: &Path, opts: &ImportOptions) -> Result<Part> {
         source: path.to_path_buf(),
         shape,
         drawn: Drawn { scale, ..Default::default() },
+        grain: None,
     })
 }
 

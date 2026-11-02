@@ -214,6 +214,9 @@ pub struct Part {
     pub source: PathBuf,
     pub shape: Shape,
     pub drawn: Drawn,
+    /// Cut along the grain (a panel), as set in the manifest; `None`: decided by name, see
+    /// [`crate::solver::NestParams::panels`].
+    pub grain: Option<bool>,
 }
 
 /// A part and how many are needed.

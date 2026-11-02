@@ -19,17 +19,21 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         String::new()
     };
     let _ = writeln!(s, "Allowed angles:      {}{tol}", angles.join(", "));
-    if params.rotation_tolerance > params.panel_tolerance {
-        let _ = writeln!(s, "Panel tilt limit:    {}°", params.panel_tolerance);
-    }
-    if params.rotation_tolerance > 0.0 && params.tilt_penalty > 0.0 {
+    let panels = demands.iter().filter(|d| params.is_panel(&d.part)).count();
+    if panels > 0 {
         let _ = writeln!(
             s,
-            "Panel tilt penalty:  {} · d² mm (panels: names containing {}; straight = {})",
-            params.tilt_penalty,
-            params.panels.join(", "),
+            "Panels (grain):      {panels} of {} parts{}; straight = {}",
+            demands.len(),
+            if params.panels.is_empty() { String::new() } else { format!(", names containing {}", params.panels.join(", ")) },
             if params.align_panels { "along the long axis" } else { "drawing X axis" }
         );
+        if params.rotation_tolerance > params.panel_tolerance {
+            let _ = writeln!(s, "Panel tilt limit:    {}°", params.panel_tolerance);
+        }
+        if params.rotation_tolerance > 0.0 && params.tilt_penalty > 0.0 {
+            let _ = writeln!(s, "Panel tilt penalty:  {} · d² mm", params.tilt_penalty);
+        }
     }
     let budget = match params.budget {
         Budget::Time(d) => format!("time {} s", d.as_secs_f32()),
@@ -67,7 +71,7 @@ pub fn render(demands: &[Demand], params: &NestParams, outcome: &NestOutcome, va
         let tilts: Vec<f64> = sheet
             .placements
             .iter()
-            .filter(|p| params.is_panel(&demands[p.part].part.name))
+            .filter(|p| params.is_panel(&demands[p.part].part))
             .map(|p| params.tilt(p.transform.rotation_deg))
             .collect();
         if !tilts.is_empty() {

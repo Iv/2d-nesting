@@ -2,7 +2,7 @@
 //!
 //! Axes: fabric width = jagua strip height (Y), cut length = strip width (X).
 
-use crate::geom::{BBox, Demand, NestResult, Placement, Pt, Sheet, Transform, Unplaced};
+use crate::geom::{BBox, Demand, NestResult, Part, Placement, Pt, Sheet, Transform, Unplaced};
 use anyhow::{bail, Context, Result};
 use jagua_rs::io::ext_repr::{ExtItem as BaseItem, ExtOrientation, ExtRotation, ExtSPolygon, ExtShape};
 use jagua_rs::io::import::Importer;
@@ -62,8 +62,10 @@ pub struct NestParams {
     pub rotation_tolerance: f64,
     /// Step of the deviation around each base angle, degrees.
     pub rotation_step: f64,
-    /// Parts whose name contains one of these (case-insensitive) are panels: their deviation from a
-    /// base angle is penalised. Other parts (ribs) may use the whole tolerance freely.
+    /// Parts whose name contains one of these (case-insensitive) are panels: they are cut along the
+    /// grain, and their deviation from a base angle is penalised. Other parts (ribs) may use the
+    /// whole tolerance freely. Empty by default: panels are asked for here or per part in the
+    /// manifest (`grain = true`), which takes precedence.
     pub panels: Vec<String>,
     /// Penalty for a panel deviating from a base angle by d degrees: `tilt_penalty · d²`, in mm of
     /// used length. Among the layouts found, the one with the least length + penalty is kept.
@@ -104,7 +106,7 @@ impl Default for NestParams {
             rotations: vec![0.0, 90.0, 180.0, 270.0],
             rotation_tolerance: 0.0,
             rotation_step: 1.0,
-            panels: vec!["top".into(), "bot".into()],
+            panels: Vec::new(),
             tilt_penalty: 10.0,
             panel_tolerance: 3.0,
             align_panels: true,
@@ -149,8 +151,13 @@ impl NestParams {
         out
     }
 
-    /// Whether a part (by name) is a panel, see [`NestParams::panels`].
-    pub fn is_panel(&self, name: &str) -> bool {
+    /// Whether a part is a panel: as the manifest says, otherwise by name, see [`NestParams::panels`].
+    pub fn is_panel(&self, part: &Part) -> bool {
+        part.grain.unwrap_or_else(|| self.panel_by_name(&part.name))
+    }
+
+    /// Whether a part name contains one of [`NestParams::panels`].
+    pub fn panel_by_name(&self, name: &str) -> bool {
         let name = name.to_lowercase();
         self.panels.iter().any(|p| !p.is_empty() && name.contains(&p.to_lowercase()))
     }
@@ -230,8 +237,8 @@ impl NestParams {
     }
 
     /// Penalty of a part placed at `rotation_deg`, mm of length (0 for non-panels).
-    pub fn tilt_cost(&self, name: &str, rotation_deg: f64) -> f64 {
-        if self.tilt_penalty > 0.0 && self.is_panel(name) {
+    pub fn tilt_cost(&self, part: &Part, rotation_deg: f64) -> f64 {
+        if self.tilt_penalty > 0.0 && self.is_panel(part) {
             let d = self.tilt(rotation_deg);
             // Below the angle snapping noise a part counts as straight.
             if d < 1e-3 { 0.0 } else { self.tilt_penalty * d * d }
@@ -259,7 +266,7 @@ pub const MIN_PANEL_ELONGATION: f64 = 2.0;
 pub fn align_panels(demands: &mut [Demand], params: &NestParams) -> Vec<(usize, f64)> {
     let mut turned = Vec::new();
     for (i, d) in demands.iter_mut().enumerate() {
-        if !params.is_panel(&d.part.name) {
+        if !params.is_panel(&d.part) {
             continue;
         }
         let (axis, elongation) = d.part.shape.long_axis();
@@ -344,7 +351,7 @@ pub fn nest_observed(demands: &[Demand], params: &NestParams, observer: &mut dyn
     let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
     let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
     let area = |i: usize| demands[i].part.shape.area();
-    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
     // Fabric a sheet consumes plus the tilt penalty: what the polishing passes minimise.
@@ -459,7 +466,7 @@ fn make_sheets(
     let bbox = |p: &Placement| demands[p.part].part.shape.transformed(&p.transform).bbox();
     let len_of = |pl: &[Placement]| pl.iter().map(|p| bbox(p).max.x).fold(0.0, f64::max);
     let area = |i: usize| demands[i].part.shape.area();
-    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+    let tilt_of = |pl: &[Placement]| pl.iter().map(|p| params.tilt_cost(&demands[p.part].part, p.transform.rotation_deg)).sum::<f64>();
     let eps = 1e-6;
     let fits = |pl: &[Placement]| len_of(pl) <= params.length + eps;
     // A probe that adds part `c` is kept only if the sheet grows by no more than the part would take
@@ -655,7 +662,7 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
         let fitting: Vec<f64> = angles
             .iter()
             .copied()
-            .filter(|&r| !params.is_panel(&d.part.name) || params.tilt(r) <= params.panel_tolerance + 1e-9)
+            .filter(|&r| !params.is_panel(&d.part) || params.tilt(r) <= params.panel_tolerance + 1e-9)
             .filter(|&r| {
                 let b = rotated_bbox(d, r);
                 b.height() <= params.width + 1e-6 && b.width() <= params.length + 1e-6
@@ -711,7 +718,7 @@ fn prepare<'a>(demands: &'a [Demand], params: &NestParams) -> (Prepared<'a>, Vec
             }
         };
         items.push(Some(item));
-        let costs: Vec<(f32, f32)> = fitting.iter().map(|&r| ((r.to_radians()) as f32, params.tilt_cost(&d.part.name, r) as f32)).collect();
+        let costs: Vec<(f32, f32)> = fitting.iter().map(|&r| ((r.to_radians()) as f32, params.tilt_cost(&d.part, r) as f32)).collect();
         tilt.items.push(costs.iter().any(|c| c.1 > 0.0).then_some(costs));
     }
     // One small table per job, shared by all solver threads for the rest of the process: sparrow's
@@ -760,7 +767,7 @@ impl Prepared<'_> {
             let len = pl.iter().map(|p| self.demands[p.part].part.shape.transformed(&p.transform).bbox().max.x).fold(0.0, f64::max);
             // Fabric consumed (free space open to the top or the right end counts less) + tilt penalty.
             let cost = params.consumed(self.demands, &pl, len)
-                + pl.iter().map(|p| params.tilt_cost(&self.demands[p.part].part.name, p.transform.rotation_deg)).sum::<f64>();
+                + pl.iter().map(|p| params.tilt_cost(&self.demands[p.part].part, p.transform.rotation_deg)).sum::<f64>();
             // A layout that fits the sheet beats one that does not, whatever the penalty.
             let fits = len <= max_len + 1e-6;
             if best.as_ref().is_none_or(|b| (fits, -cost) > (b.0, -b.1)) {

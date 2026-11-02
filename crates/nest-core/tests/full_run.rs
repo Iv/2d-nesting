@@ -149,7 +149,7 @@ fn panel_job() -> tempfile::TempDir {
     save(dir.path(), "top1", mm, vec![on("CUT", trapezoid(1400.0, 250.0, 120.0, 40.0))]);
     save(dir.path(), "bot1", mm, vec![on("CUT", trapezoid(1100.0, 200.0, 30.0, 150.0))]);
     save(dir.path(), "rib1", mm, vec![on("CUT", trapezoid(900.0, 120.0, 400.0, 0.0))]);
-    fs::write(dir.path().join("parts.toml"), "[parts]\ntop1 = { qty = 2, left = 2 }\nbot1 = { left = 2 }\nrib1 = 2\n").unwrap();
+    fs::write(dir.path().join("parts.toml"), "grain = true\n[parts]\ntop1 = { qty = 2, left = 2 }\nbot1 = { left = 2 }\nrib1 = { qty = 2, grain = false }\n").unwrap();
     dir
 }
 
@@ -179,7 +179,7 @@ fn parts_are_inserted_as_their_source_drawings() {
         .collect();
     let text = dxf::entities::Text { value: "TOP1 L-12".into(), text_height: 2.5, location: dxf::Point::new(40.0, 15.0, 0.0), ..Default::default() };
     save(dir.path(), "top1", dxf::enums::Units::Centimeters, vec![on("CUT", lwpoly(&corners, &[], true)), on("MARK", EntityType::Text(text))]);
-    fs::write(dir.path().join("parts.toml"), "[parts]\ntop1 = { qty = 2, left = 2 }\n").unwrap();
+    fs::write(dir.path().join("parts.toml"), "[parts]\ntop1 = { qty = 2, left = 2, grain = true }\n").unwrap();
 
     let out = tempfile::tempdir().unwrap();
     let p = NestParams { rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 3) };
@@ -217,11 +217,17 @@ fn parts_are_inserted_as_their_source_drawings() {
 
 #[test]
 fn panels_are_kept_straight() {
+    use nest_core::geom::Part;
     let p = NestParams { tilt_penalty: 10.0, rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 7) };
-    assert!(p.is_panel("Top1_L") && p.is_panel("bot3") && !p.is_panel("rib1"));
+    let part = |name: &str, grain: Option<bool>| Part { name: name.into(), grain, ..Default::default() };
+    // Off unless asked for: by name (--panels) or per part in the manifest, which wins.
+    assert!(!NestParams::default().is_panel(&part("top1", None)));
+    let by_name = NestParams { panels: vec!["top".into(), "bot".into()], ..p.clone() };
+    assert!(by_name.is_panel(&part("Top1_L", None)) && by_name.is_panel(&part("bot3", None)) && !by_name.is_panel(&part("rib1", None)));
+    assert!(!by_name.is_panel(&part("top1", Some(false))) && p.is_panel(&part("rib1", Some(true))));
     assert_eq!(p.tilt(352.0), 8.0);
-    assert_eq!(p.tilt_cost("top1", 92.0), 40.0);
-    assert_eq!(p.tilt_cost("rib1", 92.0), 0.0);
+    assert_eq!(p.tilt_cost(&part("top1", Some(true)), 92.0), 40.0);
+    assert_eq!(p.tilt_cost(&part("rib1", None), 92.0), 0.0);
 
     let input = panel_job();
     let out = tempfile::tempdir().unwrap();
@@ -231,7 +237,7 @@ fn panels_are_kept_straight() {
     let panels: Vec<f64> = sheets
         .iter()
         .flat_map(|s| &s.placements)
-        .filter(|pl| p.is_panel(&job.demands[pl.part].part.name))
+        .filter(|pl| p.is_panel(&job.demands[pl.part].part))
         .map(|pl| p.tilt(pl.transform.rotation_deg))
         .collect();
     assert_eq!(panels.len(), 6);
@@ -273,8 +279,9 @@ fn panel_tilt_is_limited() {
     let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &p).unwrap();
     assert!(job.valid(), "{}", job.report);
     for pl in job.outcome.result.sheets.iter().flat_map(|s| &s.placements) {
-        let name = &job.demands[pl.part].part.name;
-        assert!(!p.is_panel(name) || p.tilt(pl.transform.rotation_deg) <= 2.0 + 1e-6, "{name} at {}°", pl.transform.rotation_deg);
+        let part = &job.demands[pl.part].part;
+        let name = &part.name;
+        assert!(!p.is_panel(part) || p.tilt(pl.transform.rotation_deg) <= 2.0 + 1e-6, "{name} at {}°", pl.transform.rotation_deg);
     }
     assert!(job.report.contains("Panel tilt limit:    2°"));
 }
@@ -291,7 +298,7 @@ fn tilted_panels_are_aligned_to_their_long_axis() {
     let (axis, elongation) = drawn.long_axis();
     assert!((axis - 7.0).abs() < 0.05 && elongation > 3.0, "{axis} {elongation}");
 
-    let turned = nest_core::solver::align_panels(&mut demands, &NestParams::default());
+    let turned = nest_core::solver::align_panels(&mut demands, &NestParams { panels: vec!["top".into(), "bot".into()], ..NestParams::default() });
     assert_eq!(turned.len(), 1);
     assert_eq!(turned[0].0, 0);
     assert!((turned[0].1 + 7.0).abs() < 0.05);

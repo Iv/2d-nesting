@@ -133,9 +133,10 @@ struct RunArgs {
     #[arg(long, default_value_t = 1.0)]
     rotation_step: f64,
 
-    /// Parts whose name contains one of these (comma-separated, case-insensitive) are panels:
-    /// their deviation from a base angle is penalised
-    #[arg(long, default_value = "top,bot", value_delimiter = ',')]
+    /// Parts whose name contains one of these (comma-separated, case-insensitive) are panels: cut
+    /// along the grain, their deviation from a base angle is penalised (e.g. top,bot). Off by
+    /// default; `grain = true / false` in the manifest marks single parts and takes precedence
+    #[arg(long, value_delimiter = ',')]
     panels: Vec<String>,
 
     /// Panel tilt penalty: a panel turned d degrees off a base angle costs this · d² mm of

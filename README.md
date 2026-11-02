@@ -13,17 +13,22 @@ than holes in the middle, left panels as mirrored right ones. Most of these rule
 penalties in a few places (see [How sheets are filled](#how-sheets-are-filled)), so adapting it to
 another kind of part with other priorities should not be hard.
 
+On real gliders the parts consistently take 84 % or more of the fabric used, and up to 92 % in
+some cases (see the examples below).
+
 Example layouts for a real glider (Tayran 6, size 29), with DXF, SVG and reports:
 [`examples/`](examples/README.md).
 
 - One part per DXF file, quantities from a small manifest.
 - Parts are nested by their **outer contour**; everything inside (holes, cut-outs, marks,
   open lines) travels with the part into the output.
-- Fixed sheets, e.g. 1560 × 5800 mm (the cutting table): sheets are filled one after another.
+- Fixed sheets, 1560 × 5800 mm by default (our laser table); any size is set with `--width` and
+  `--length`. Sheets are filled one after another.
 - Allowed rotations: base angles (default 0/90/180/270) plus an optional ± tolerance.
-- Panels (names containing `top` or `bot`) are cut along the grain: they are turned so their long
-  axis lies along the fabric, and a deviation from that is penalised, the more the deviation, the
-  more the penalty. Ribs use the tolerance freely.
+- Panels, when asked for, are cut along the grain: they are turned so their long axis lies along
+  the fabric, and a deviation from that is penalised, the more the deviation, the more the penalty.
+  Panels are marked per part in the manifest (`grain = true`) or by name (`--panels top,bot`);
+  other parts (ribs) use the tolerance freely.
 - A free strip along the top of a sheet is reusable fabric, valued below fabric saved at the end.
 - Fillers: small parts of other jobs that go into free space without making a sheet longer.
 - Left-hand panels: parts are drawn as right-hand ones, the manifest asks for mirrored copies.
@@ -95,7 +100,13 @@ rib1 = 2
 rib2 = { qty = 2 }
 top5 = { qty = 1, left = 1 }   # one as drawn (right) and one mirrored (left)
 bot5 = { right = 1, left = 1 } # `right` is the same as `qty`
+top6 = { qty = 1, left = 1, grain = true }  # a panel: cut along the grain, see "Panel tilt"
 ```
+
+`grain = true` marks a part as a panel, `grain = false` as a part free to tilt, whatever its name.
+A `grain = ...` line before `[parts]` applies to every part that does not set it, e.g. a folder of
+panels starts with `grain = true`. Without `grain` a part is a panel only if `--panels` names it.
+In `parts.csv` panels are chosen with `--panels` only.
 
 ```csv
 name,qty,left
@@ -118,7 +129,7 @@ contour and everything inside) and appear as `<name>_L` in the layout and the re
 | `-r, --rotations` | 0,90,180,270 | base rotation angles, degrees; `0` disables rotation |
 | `--rotation-tolerance` | 0 | each base angle ± this, degrees |
 | `--rotation-step` | 1 | step within the tolerance, degrees |
-| `--panels` | top,bot | parts whose name contains one of these are panels |
+| `--panels` | – | parts whose name contains one of these are panels (e.g. `top,bot`); `grain` in the manifest takes precedence |
 | `--tilt-penalty` | 10 | a panel d° off a base angle costs this · d² mm of length; 0 = off |
 | `--panel-tolerance` | 3 | largest tilt of a panel off a base angle, degrees (ribs use the whole `--rotation-tolerance`) |
 | `--panel-axis` | long | panel grain: `long` (along the long axis) or `drawn` (drawing X axis) |
@@ -150,13 +161,8 @@ and the insert count of each block as a comment.
 not blocks but loose outlines with a label inside (panels such as `A16` under a heading `TOP COLOR 1`):
 each label's smallest closed contour becomes `<dir>/<section>_col<k>/<section>_<number><letter>.dxf`,
 grouped by drawing column (`--split-x` gives the column borders explicitly, `--region` limits the
-search). Each `parts.toml` asks for one right and one left (mirrored) copy of every panel.
-
-`nest extract-labelled <assembly.dxf> --headings TOP=top,BOT=bottom --out <dir>` is for parts that are
-not blocks but loose outlines with a label inside (panels such as `A16` under a heading `TOP COLOR 1`):
-each label's smallest closed contour becomes `<dir>/<section>_col<k>/<section>_<number><letter>.dxf`,
-grouped by drawing column (`--split-x` gives the column borders explicitly, `--region` limits the
-search). Each `parts.toml` asks for one right and one left (mirrored) copy of every panel.
+search). Each `parts.toml` asks for one right and one left (mirrored) copy of every panel and
+marks them all as panels (`grain = true`).
 
 ## How sheets are filled
 
@@ -194,6 +200,10 @@ at 1/10 of the time limit with different seeds; the draft with the fewest sheets
 staying on it. One such run is meant to replace a seed sweep, e.g. on a laptop.
 
 ### Panel tilt
+
+Off unless asked for: a part is a panel if the manifest says `grain = true`, or, without `grain`,
+if its name contains one of `--panels` (case-insensitive, e.g. `--panels top,bot`). The report
+says how many parts are panels.
 
 Panels should be cut straight: a strip of fabric left free beside them is better than tilted
 panels. Both threads of the fabric are fine (warp and weft, i.e. 0/90/180/270°), any angle to
