@@ -9,7 +9,7 @@ use dxf::entities::{Entity, EntityType, Insert, LwPolyline, Text};
 use dxf::LwPolylineVertex;
 use dxf::enums::{AcadVersion, HorizontalTextJustification, Units, VerticalTextJustification};
 use dxf::tables::Layer;
-use dxf::{Block, Color, Drawing, Point};
+use dxf::{Block, Color, Drawing, Handle, Point};
 use geo::InteriorPoint;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,43 @@ pub fn write_sheet(path: &Path, demands: &[Demand], sheet: &Sheet, opts: &Output
         d.add_entity(label(&part.name, &s));
     }
 
-    d.save_file(path).with_context(|| format!("{}: cannot write DXF", path.display()))
+    let mut buf = Vec::new();
+    d.save(&mut buf).with_context(|| format!("{}: cannot write DXF", path.display()))?;
+    let text = String::from_utf8(buf).context("DXF writer produced non-UTF-8 text")?;
+    let text = fix_endblk_handles(&text);
+    std::fs::write(path, text).with_context(|| format!("{}: cannot write DXF", path.display()))
+}
+
+/// The dxf crate (0.6) writes ENDBLK with the handle of its BLOCK, so every block's handle appears
+/// twice. Gives each ENDBLK a new handle above every handle in the file and moves `$HANDSEED`
+/// past them (the writer assigns some handles while saving, beyond the drawing's own counter).
+fn fix_endblk_handles(text: &str) -> String {
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<String> = text.split(eol).map(str::to_string).collect();
+    let top = lines
+        .chunks(2)
+        .filter(|p| p.len() == 2 && p[0].trim() == "5")
+        .filter_map(|p| u64::from_str_radix(p[1].trim(), 16).ok())
+        .max()
+        .unwrap_or(0);
+    let mut next = Handle(top + 1);
+    let mut seed_at = None;
+    let mut i = 0;
+    while i + 3 < lines.len() {
+        let (code, value) = (lines[i].trim(), lines[i + 1].trim());
+        if code == "9" && value == "$HANDSEED" && lines[i + 2].trim() == "5" {
+            seed_at = Some(i + 3);
+        }
+        if code == "0" && value == "ENDBLK" && lines[i + 2].trim() == "5" {
+            lines[i + 3] = next.as_string();
+            next = next.next_handle_value();
+        }
+        i += 2;
+    }
+    if let Some(k) = seed_at {
+        lines[k] = next.as_string();
+    }
+    lines.join(eol)
 }
 
 /// Source drawings copied into the sheet as blocks, one per source file (left copies use the
@@ -84,19 +120,20 @@ impl Blocks {
             name.push('_');
         }
         // The source's own layers, line types and text styles, unless the sheet has one of that name.
+        // add_* give them new handles; owners point into the source file, so they are dropped.
         for l in src.layers() {
             if !d.layers().any(|o| o.name.eq_ignore_ascii_case(&l.name)) {
-                d.add_layer(l.clone());
+                d.add_layer(dxf::tables::Layer { __owner_handle: Handle::empty(), ..l.clone() });
             }
         }
         for lt in src.line_types() {
             if !d.line_types().any(|o| o.name.eq_ignore_ascii_case(&lt.name)) {
-                d.add_line_type(lt.clone());
+                d.add_line_type(dxf::tables::LineType { __owner_handle: Handle::empty(), ..lt.clone() });
             }
         }
         for st in src.styles() {
             if !d.styles().any(|o| o.name.eq_ignore_ascii_case(&st.name)) {
-                d.add_style(st.clone());
+                d.add_style(dxf::tables::Style { __owner_handle: Handle::empty(), ..st.clone() });
             }
         }
         // Blocks the part uses (directly or nested; files cut from an assembly carry all of its
@@ -117,8 +154,9 @@ impl Blocks {
             .iter()
             .map(|b| (b.name.to_ascii_uppercase(), block_name(&format!("{name}${}", b.name.trim_start_matches('*')))))
             .collect();
-        let rename = |e: &Entity| {
+        let rename = |d: &mut Drawing, e: &Entity| {
             let mut e = e.clone();
+            rehandle(d, &mut e);
             match &mut e.specific {
                 EntityType::Insert(ins) => {
                     if let Some(n) = inner.get(&ins.name.to_ascii_uppercase()) {
@@ -135,22 +173,50 @@ impl Blocks {
             e
         };
         for b in used {
+            let entities = b.entities.iter().map(|e| rename(d, e)).collect();
             d.add_block(Block {
                 name: inner[&b.name.to_ascii_uppercase()].clone(),
                 base_point: b.base_point.clone(),
                 layer: b.layer.clone(),
-                entities: b.entities.iter().map(rename).collect(),
+                entities,
                 ..Default::default()
             });
         }
-        d.add_block(Block {
-            name: name.clone(),
-            layer: "0".into(),
-            entities: src.entities().map(rename).collect(),
-            ..Default::default()
-        });
+        let entities = src.entities().map(|e| rename(d, e)).collect();
+        d.add_block(Block { name: name.clone(), layer: "0".into(), entities, ..Default::default() });
         self.by_source.insert(source.to_path_buf(), name.clone());
         Ok(name)
+    }
+}
+
+/// Gives an entity copied from another file handles of this drawing. Every source file numbers its
+/// objects from the start, so copied handles clash between parts (readers such as ezdxf then refuse
+/// to save the sheet); references into the source file (owner, reactors, material) are dropped.
+fn rehandle(d: &mut Drawing, e: &mut Entity) {
+    let mut next = || {
+        let h = d.header.next_available_handle;
+        d.header.next_available_handle = h.next_handle_value();
+        h
+    };
+    e.common.handle = next();
+    e.common.__owner_handle = Handle::empty();
+    e.common.__material_handle = Handle::empty();
+    e.common.__plot_style_handle = Handle::empty();
+    e.common.extension_data_groups.clear();
+    match &mut e.specific {
+        EntityType::Insert(ins) => {
+            ins.__seqend_handle = next();
+            for a in ins.__attributes_and_handles.iter_mut() {
+                a.1 = next();
+            }
+        }
+        EntityType::Polyline(poly) => {
+            poly.__seqend_handle = next();
+            for v in poly.__vertices_and_handles.iter_mut() {
+                v.1 = next();
+            }
+        }
+        _ => {}
     }
 }
 

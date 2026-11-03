@@ -216,6 +216,34 @@ fn parts_are_inserted_as_their_source_drawings() {
 }
 
 #[test]
+fn sheet_dxf_handles_are_unique() {
+    // Every part file numbers its objects from the start; copied into one sheet they must not clash.
+    let input = panel_job();
+    let out = tempfile::tempdir().unwrap();
+    let job = nest_core::run(input.path(), out.path(), &ImportOptions::default(), &params(3.0, vec![0.0, 90.0, 180.0, 270.0], 5)).unwrap();
+    for file in &job.sheet_files {
+        let text = fs::read_to_string(file).unwrap();
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let mut seen = std::collections::HashSet::new();
+        let (mut top, mut seed) = (0u64, 0u64);
+        for (k, p) in lines.chunks(2).enumerate() {
+            if p.len() == 2 && p[0] == "5" {
+                let h = u64::from_str_radix(p[1], 16).unwrap();
+                if k > 0 && lines[2 * k - 1] == "$HANDSEED" {
+                    seed = h;
+                    continue;
+                }
+                assert!(seen.insert(h), "{}: handle {:X} used twice", file.display(), h);
+                top = top.max(h);
+            }
+        }
+        assert!(seen.len() > 10 && seed > top, "{} handles, max {top:X}, seed {seed:X}", seen.len());
+        // Still a drawing the dxf crate reads back.
+        Drawing::load_file(file).unwrap();
+    }
+}
+
+#[test]
 fn panels_are_kept_straight() {
     use nest_core::geom::Part;
     let p = NestParams { tilt_penalty: 10.0, rotation_tolerance: 10.0, rotation_step: 2.0, ..params(3.0, vec![0.0, 90.0, 180.0, 270.0], 7) };
